@@ -1,0 +1,35 @@
+{
+  "name": "github-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "test": "jest",
+    "index:repo": "tsx src/rag/indexer.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "^2.1.145",
+    "@anthropic-ai/sdk": "^0.95.2",
+    "@octokit/rest": "^22.0.1",
+    "chromadb": "^3.4.3",
+    "dotenv": "^17.4.2",
+    "p-limit": "^7.3.0",
+    "simple-git": "^3.36.0",
+    "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^25.7.0",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.9",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}

@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: github-agent-chromadb
+    volumes:
+      - ./chroma-data:/chroma/chroma
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: github-agent-ollama
+    volumes:
+      - ./ollama-data:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Para usar GPU NVIDIA, instale o NVIDIA Container Toolkit e descomente:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: github-agent
+    depends_on:
+      chromadb:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: info
+      CHROMA_URL: http://chromadb:8000
+      OLLAMA_URL: http://ollama:11434
+    env_file:
+      - .env
+    volumes:
+      # O repositório alvo — clone aqui antes de subir o agente
+      - ./workspace/repo:/workspace/repo
+      # Logs persistem entre restarts
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  # Serviço auxiliar para indexar o repositório (roda uma vez e sai)
+  indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: github-agent-indexer
+    depends_on:
+      chromadb:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      CHROMA_URL: http://chromadb:8000
+      OLLAMA_URL: http://ollama:11434
+    env_file:
+      - .env
+    volumes:
+      - ./workspace/repo:/workspace/repo
+    command: ["node", "dist/rag/indexer.js"]
+    profiles:
+      - indexer # só sobe quando explicitamente pedido

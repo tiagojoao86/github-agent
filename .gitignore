@@ -1,0 +1,5 @@
+.env
+node_modules/
+ollama-data/
+package-lock.json
+
