@@ -28,7 +28,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     logger.info(`Sinal ${signal} recebido - aguardando tick atual terminar...`);
     scheduler.stop();
-    await new Promise<void>((resolve) => setTimeout(resolve, 60000));
+    await scheduler.waitForIdle();
     logger.info('Shutdown concluído');
     process.exit(0);
   }

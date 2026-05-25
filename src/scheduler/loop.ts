@@ -44,6 +44,12 @@ export class Scheduler {
     }
   }
 
+  async waitForIdle(): Promise<void> {
+    while (this.isRunning) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
   private async tick(): Promise<void> {
     // Lock simples: não inicia nova iteração se ainda está processando
     if (this.isRunning) {
