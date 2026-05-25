@@ -3,4 +3,4 @@ node_modules/
 ollama-data/
 package-lock.json
 dist
-
+logs
