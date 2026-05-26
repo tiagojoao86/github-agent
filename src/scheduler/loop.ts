@@ -155,7 +155,9 @@ export class Scheduler {
       }
     } catch (error) {
       // Em caso de erro inesperado, devolve para agent-ready para nova tentativa
-      issueLogger.error('Erro inesperado no processamento', { error });
+      const message = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+      issueLogger.error('Erro inesperado no processamento', { message, stack });
       try {
         await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_READY);
       } catch {
@@ -182,7 +184,9 @@ export class Scheduler {
         await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
       }
     } catch (error) {
-      logger.error(`Erro ao retomar issue #${issue.number}`, { error });
+      const message = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+      logger.error(`Erro ao retomar issue #${issue.number}`, { message, stack });
       await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING)
         .catch(() => { });
     }

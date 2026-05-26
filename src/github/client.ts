@@ -133,7 +133,7 @@ export class GitHubClient {
       owner: this.owner,
       repo: this.repo,
       issue_number: issueNumber,
-      body,
+      body: body + '\n<!-- github-agent-bot -->',
     });
     logger.info(`Comentário postado na issue #${issueNumber}`);
     return data.id;
@@ -152,7 +152,7 @@ export class GitHubClient {
       body: comment.body ?? '',
       author: comment.user?.login ?? 'unknown',
       createdAt: comment.created_at,
-      isBot: comment.user?.login === this.botLogin,
+      isBot: comment.body?.includes('<!-- github-agent-bot -->') ?? false,
     }));
   }
 
@@ -216,6 +216,28 @@ export class GitHubClient {
     }
 
     return branchName;
+  }
+
+  async findPRForBranch(branchName: string): Promise<{ number: number; url: string; state: string } | null> {
+    const { data } = await this.octokit.pulls.list({
+      owner: this.owner,
+      repo: this.repo,
+      head: `${this.owner}:${branchName}`,
+      state: 'all',
+      per_page: 1,
+    });
+    if (data.length === 0) return null;
+    return { number: data[0].number, url: data[0].html_url, state: data[0].state };
+  }
+
+  async resetStuckProcessingIssues(): Promise<void> {
+    const stuck = await this.getIssuesWithLabel(env.LABEL_PROCESSING);
+    if (stuck.length === 0) return;
+    logger.warn(`Recuperando ${stuck.length} issue(s) presas em agent-processing`);
+    for (const issue of stuck) {
+      await this.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_READY);
+      logger.info(`Issue #${issue.number} voltou para agent-ready`);
+    }
   }
 
   async createPullRequest(

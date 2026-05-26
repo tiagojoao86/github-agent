@@ -1,6 +1,7 @@
 import { ChromaClient } from 'chromadb';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { RepositoryIndexer } from './indexer.js';
 
 export interface RetrievalResult {
   chunks: Array<{
@@ -14,6 +15,7 @@ export interface RetrievalResult {
 export class RagEngine {
   private chroma: ChromaClient;
   private collectionName: string;
+  private static indexingPromise: Promise<void> | null = null;
 
   constructor() {
     this.chroma = new ChromaClient({ path: env.CHROMA_URL });
@@ -22,9 +24,25 @@ export class RagEngine {
       .replace(/[^a-z0-9-]/g, '-');
   }
 
+  private async ensureIndexed(): Promise<void> {
+    if (RagEngine.indexingPromise) {
+      logger.info('Indexação já em curso — aguardando...');
+      await RagEngine.indexingPromise;
+      return;
+    }
+
+    logger.info('Coleção RAG não encontrada — iniciando indexação automática do repositório...');
+    RagEngine.indexingPromise = new RepositoryIndexer()
+      .index(env.REPO_LOCAL_PATH)
+      .finally(() => { RagEngine.indexingPromise = null; });
+
+    await RagEngine.indexingPromise;
+    logger.info('Indexação automática concluída — retomando RAG.');
+  }
+
   async retrieveContext(
     query: string,
-    topK: number = 8
+    topK: number = 5
   ): Promise<RetrievalResult> {
     logger.debug(`RAG retrieval para query: "${query.substring(0, 80)}..."`);
 
@@ -32,7 +50,17 @@ export class RagEngine {
     const queryEmbedding = await this.generateQueryEmbedding(query);
 
     // Busca no ChromaDB
-    const collection = await this.chroma.getCollection({ name: this.collectionName });
+    let collection;
+    try {
+      collection = await this.chroma.getCollection({ name: this.collectionName });
+    } catch (error: any) {
+      if (error?.name === 'ChromaNotFoundError' || error?.message?.includes('could not be found')) {
+        await this.ensureIndexed();
+        collection = await this.chroma.getCollection({ name: this.collectionName });
+      } else {
+        throw error;
+      }
+    }
 
     const results = await collection.query({
       queryEmbeddings: [queryEmbedding],
@@ -52,8 +80,8 @@ export class RagEngine {
       };
     });
 
-    // Filtra chunks com score muito baixo (provavelmente irrelevantes)
-    const relevantChunks = chunks.filter((c) => c.score > 0.3);
+    // Filtra chunks com score baixo (aumentado de 0.3 para 0.45 para menos ruído)
+    const relevantChunks = chunks.filter((c) => c.score > 0.45);
 
     const totalTokensEstimate = relevantChunks.reduce(
       (acc, c) => acc + Math.ceil(c.content.length / 4),
@@ -68,16 +96,41 @@ export class RagEngine {
   }
 
   private async generateQueryEmbedding(text: string): Promise<number[]> {
+    const safeText = text.length > 2000 ? text.slice(0, 2000) : text;
     const response = await fetch(`${env.OLLAMA_URL}/api/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: env.EMBEDDING_MODEL, prompt: text }),
+      body: JSON.stringify({ model: env.EMBEDDING_MODEL, prompt: safeText }),
     });
     if (!response.ok) {
-      throw new Error(`Ollama embedding falhou: ${await response.text()}`);
+      const errorText = await response.text();
+      if (errorText.includes('not found')) {
+        await this.pullModel();
+        return this.generateQueryEmbedding(text);
+      }
+      throw new Error(`Ollama embedding falhou: ${errorText}`);
     }
     const data = await response.json() as { embedding: number[] };
     return data.embedding;
+  }
+
+  private static pullingModel = false;
+
+  private async pullModel(): Promise<void> {
+    if (RagEngine.pullingModel) return;
+    RagEngine.pullingModel = true;
+    logger.info(`Modelo "${env.EMBEDDING_MODEL}" não encontrado — fazendo pull no Ollama...`);
+    try {
+      const response = await fetch(`${env.OLLAMA_URL}/api/pull`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: env.EMBEDDING_MODEL, stream: false }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      logger.info(`Pull do modelo "${env.EMBEDDING_MODEL}" concluído.`);
+    } finally {
+      RagEngine.pullingModel = false;
+    }
   }
 }
 

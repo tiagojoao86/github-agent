@@ -1,4 +1,4 @@
-import { GitHubComment } from "../github/model/github-comment";
+import { GitHubComment } from "../github/model/github-comment.js";
 
 export interface ConversationTurn {
   role: 'agent' | 'human';

@@ -211,15 +211,43 @@ export class AgentRunner {
       };
     }
 
-    // Output ambíguo — o agente não sinalizou o status corretamente
+    // Output ambíguo — verificar estado real da branch antes de pedir ajuda
     log.warn('Agente não sinalizou status corretamente. Output (últimos 500 chars):');
     log.warn(agentOutput.slice(-500));
 
+    // 1. Há PR aberto ou fechado para esta branch?
+    const pr = await this.github.findPRForBranch(branchName).catch(() => null);
+    if (pr) {
+      const stateLabel = pr.state === 'open' ? 'aberto' : 'fechado';
+      log.info(`Branch tem PR #${pr.number} (${pr.state}) — sessão foi interrompida após criação`);
+      return {
+        type: 'needs-clarification',
+        question:
+          `🤖 A sessão foi interrompida mas encontrei o PR #${pr.number} (${stateLabel}): ${pr.url}\n\n` +
+          `Por favor, verifique se a implementação está correcta e faça merge se estiver.`,
+      };
+    }
+
+    // 2. Há commits na branch?
+    const git = simpleGit(env.REPO_LOCAL_PATH);
+    const commits = await git.log({ from: 'origin/main', to: branchName }).catch(() => null);
+    if (commits && commits.total > 0) {
+      log.info(`Branch tem ${commits.total} commit(s) mas sem PR — sessão interrompida a meio`);
+      return {
+        type: 'needs-clarification',
+        question:
+          `🤖 A sessão foi interrompida. Encontrei ${commits.total} commit(s) na branch \`${branchName}\` mas sem PR.\n\n` +
+          `Responda com **"continuar"** para criar o PR com o que foi implementado, ou **"recomeçar"** para que eu reanalise a issue do zero.`,
+      };
+    }
+
+    // 3. Sem PR e sem commits — nada foi feito
+    log.info('Branch sem commits — sessão interrompida antes de qualquer implementação');
     return {
       type: 'needs-clarification',
       question:
-        '🤖 Processei esta issue mas não consegui determinar se a implementação foi concluída. ' +
-        'Por favor, verifique a branch `' + branchName + '` e confirme se devo prosseguir ou se há algo mais a fazer.',
+        `🤖 A sessão foi interrompida antes de qualquer implementação na branch \`${branchName}\`.\n\n` +
+        `Responda com **"recomeçar"** para que eu tente novamente.`,
     };
   }
 
@@ -232,7 +260,7 @@ Este PR foi criado automaticamente pelo agente de issues.
 
 ## O que foi feito
 
-O agente analisou a issue e implementou as modificações necessárias. 
+O agente analisou a issue e implementou as modificações necessárias.
 Por favor, revise as mudanças antes de fazer merge.
 
 ## Checklist
@@ -240,6 +268,15 @@ Por favor, revise as mudanças antes de fazer merge.
 - [ ] Revisei as mudanças no diff
 - [ ] Os testes passam
 - [ ] A implementação resolve o problema descrito na issue
+
+## Solicitar alterações
+
+Se a implementação não estiver correcta:
+1. Comente na **issue #${issue.number}** explicando o que está errado
+2. Remova o label \`agent-done\` da issue
+3. Adicione o label \`waiting-for-human\`
+
+O agente retomará com o contexto do seu feedback e actualizará este PR.
 
 ---
 *Gerado automaticamente pelo GitHub Agent*`;
@@ -266,9 +303,7 @@ Por favor, responda a este comentário com o esclarecimento e serei retomado aut
   }): AsyncIterable<any> {
     const claudeBin = process.env.CLAUDE_BIN ?? 'claude';
 
-    // Remove ANTHROPIC_API_KEY do ambiente do subprocess — o claude deve usar
-    // autenticação OAuth da sessão local, não uma API key do projeto
-    const { ANTHROPIC_API_KEY: _removed, ...spawnEnv } = process.env;
+    const spawnEnv = { ...process.env };
 
     const proc = spawn(claudeBin, [
       '--print',
@@ -283,10 +318,8 @@ Por favor, responda a este comentário com o esclarecimento e serei retomado aut
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    // Previne crash por unhandled error no abort — AbortError é esperado
-    proc.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code !== 'ABORT_ERR') throw err;
-    });
+    // Previne crash por unhandled error — AbortError e ENOENT são tratados no caller
+    proc.on('error', () => {});
 
     proc.stdin!.write(params.userPrompt);
     proc.stdin!.end();

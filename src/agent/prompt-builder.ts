@@ -44,7 +44,7 @@ export class PromptBuilder {
       try {
         const content = await readFile(join(repoPath, filename), 'utf-8');
         // Trunca para não dominar o contexto (máx ~2000 tokens)
-        const truncated = content.length > 8000 ? content.substring(0, 8000) + '\n...[truncado]' : content;
+        const truncated = content.length > 3000 ? content.substring(0, 3000) + '\n...[leia o arquivo completo se necessário]' : content;
         logger.debug(`Contexto do projeto carregado de: ${filename}`);
         return `=== ${filename} ===\n${truncated}`;
       } catch {
@@ -174,7 +174,11 @@ Use essa informação para retomar e completar a implementação.`;
     return ragContext.chunks
       .map((chunk, idx) => {
         const scorePercent = (chunk.score * 100).toFixed(0);
-        return `### [${idx + 1}] ${chunk.filePath} (relevância: ${scorePercent}%)\n\n\`\`\`\n${chunk.content}\n\`\`\``;
+        // Mostra apenas o início — o agente lê o arquivo completo quando necessário
+        const preview = chunk.content.length > 1500
+          ? chunk.content.slice(0, 1500) + '\n... [arquivo truncado — leia completo se necessário]'
+          : chunk.content;
+        return `### [${idx + 1}] ${chunk.filePath} (relevância: ${scorePercent}%)\n\n\`\`\`\n${preview}\n\`\`\``;
       })
       .join('\n\n');
   }

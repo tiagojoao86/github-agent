@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   chromadb:
     image: chromadb/chroma:latest
@@ -39,10 +37,7 @@ services:
     #           capabilities: [gpu]
 
   agent:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime
+    image: pereiratiagojoao/github-agent:latest
     container_name: github-agent
     depends_on:
       chromadb:
@@ -58,18 +53,12 @@ services:
     env_file:
       - .env
     volumes:
-      # O repositório alvo — clone aqui antes de subir o agente
       - ./workspace/repo:/workspace/repo
-      # Logs persistem entre restarts
       - ./logs:/app/logs
     restart: unless-stopped
 
-  # Serviço auxiliar para indexar o repositório (roda uma vez e sai)
   indexer:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime
+    image: pereiratiagojoao/github-agent:latest
     container_name: github-agent-indexer
     depends_on:
       chromadb:
@@ -86,4 +75,4 @@ services:
       - ./workspace/repo:/workspace/repo
     command: ["node", "dist/rag/indexer.js"]
     profiles:
-      - indexer # só sobe quando explicitamente pedido
+      - indexer

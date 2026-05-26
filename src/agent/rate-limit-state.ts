@@ -1,5 +1,5 @@
-import { logger } from "../utils/logger";
-import { calculateBackoffMs } from "./rate-limit";
+import { logger } from "../utils/logger.js";
+import { calculateBackoffMs } from "./rate-limit.js";
 
 export class RateLimitState {
   private hitCount = 0;

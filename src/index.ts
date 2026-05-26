@@ -16,6 +16,7 @@ async function main(): Promise<void> {
   await github.init();
 
   await github.ensureLabelsExists();
+  await github.resetStuckProcessingIssues();
 
   const ragEngine = new RagEngine();
   const agentRunner = new AgentRunner(github, ragEngine);

@@ -4,3 +4,4 @@ ollama-data/
 package-lock.json
 dist
 logs
+workspace

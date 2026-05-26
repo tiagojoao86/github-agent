@@ -208,16 +208,34 @@ export class RepositoryIndexer {
 
 
   private async embedOne(text: string): Promise<number[]> {
+    // Trunca para 2000 chars (~500 tokens) — seguro para qualquer variante do modelo
+    const safeText = text.length > 2000 ? text.slice(0, 2000) : text;
     const response = await fetch(`${env.OLLAMA_URL}/api/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: env.EMBEDDING_MODEL, prompt: text }),
+      body: JSON.stringify({ model: env.EMBEDDING_MODEL, prompt: safeText }),
     });
     if (!response.ok) {
-      throw new Error(`Ollama embedding falhou: ${await response.text()}`);
+      const errorText = await response.text();
+      if (errorText.includes('not found')) {
+        await this.pullModel();
+        return this.embedOne(text);
+      }
+      throw new Error(`Ollama embedding falhou: ${errorText}`);
     }
     const data = await response.json() as { embedding: number[] };
     return data.embedding;
+  }
+
+  private async pullModel(): Promise<void> {
+    logger.info(`Modelo "${env.EMBEDDING_MODEL}" não encontrado — fazendo pull no Ollama...`);
+    const response = await fetch(`${env.OLLAMA_URL}/api/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: env.EMBEDDING_MODEL, stream: false }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    logger.info(`Pull do modelo "${env.EMBEDDING_MODEL}" concluído.`);
   }
 
   getCollectionName(): string {
