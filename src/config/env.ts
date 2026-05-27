@@ -47,6 +47,7 @@ export const env = {
   LABEL_READY: 'agent-ready',
   LABEL_PROCESSING: 'agent-processing',
   LABEL_WAITING: 'waiting-for-human',
+  LABEL_WAITING_AGENT: 'waiting-for-agent',
   LABEL_DONE: 'agent-done',
 } as const;
 

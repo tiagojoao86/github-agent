@@ -53,7 +53,7 @@ export class AgentRunner {
     );
 
     // 5. Roda o agente
-    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt);
+    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, false);
   }
 
   async resumeIssue(issue: GitHubIssue, humanResponse: string): Promise<AgentResult> {
@@ -77,14 +77,15 @@ export class AgentRunner {
     );
 
     log.info('Retomando issue com contexto da resposta humana');
-    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt);
+    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, true);
   }
 
   private async runAgentSession(
     issue: GitHubIssue,
     branchName: string,
     systemPrompt: string,
-    userPrompt: string
+    userPrompt: string,
+    isResume = false
   ): Promise<AgentResult> {
     const log = createContextLogger({ issueNumber: issue.number, phase: 'agent-session' });
 
@@ -111,13 +112,18 @@ export class AgentRunner {
         })) {
           this.logMessage(message, log);
 
-          // rate_limit_event: Claude Code CLI ficará à espera internamente; abortamos
-          // proactivamente para não gastar o AGENT_TIMEOUT_MS à espera.
+          // rate_limit_event: só abortar se houver tempo de espera real.
+          // Com retryMs: 0 é um evento informativo — o CLI trata internamente e continua.
           if (message.type === 'rate_limit_event') {
             const retryMs = (message.retry_after_ms ?? message.retry_after ?? 0) * 1000;
-            log.warn('rate_limit_event recebido — abortando sessão proactivamente', { retryMs });
-            controller.abort();
-            break;
+            log.debug('rate_limit_event recebido', { retryMs, raw: JSON.stringify(message) });
+            if (retryMs > 0) {
+              log.warn('rate_limit_event com espera real — abortando proactivamente', { retryMs });
+              controller.abort();
+              break;
+            }
+            // retryMs === 0: evento informativo, deixar o CLI continuar
+            continue;
           }
 
           if (message.type === 'assistant') {
@@ -148,7 +154,7 @@ export class AgentRunner {
       );
 
       // Analisa o output do agente para determinar o resultado
-      return await this.parseAgentResult(issue, branchName, fullAgentOutput, log);
+      return await this.parseAgentResult(issue, branchName, fullAgentOutput, log, isResume);
     } catch (error) {
       if (isRateLimitError(error)) {
         log.warn('Rate limit detectado durante sessão do agente');
@@ -172,13 +178,13 @@ export class AgentRunner {
     issue: GitHubIssue,
     branchName: string,
     agentOutput: string,
-    log: ReturnType<typeof createContextLogger>
+    log: ReturnType<typeof createContextLogger>,
+    isResume = false
   ): Promise<AgentResult> {
     // Procura pelos sinalizadores de status no output do agente
     if (agentOutput.includes('AGENT_STATUS: SUCCESS')) {
-      log.info('Agente sinalizou sucesso — criando PR');
+      log.info('Agente sinalizou sucesso — verificando branch e PR');
 
-      // Verifica se há commits na branch
       const git = simpleGit(env.REPO_LOCAL_PATH);
       const log_result = await git.log({ from: 'origin/main', to: branchName }).catch(() => null);
 
@@ -195,7 +201,13 @@ export class AgentRunner {
       // Faz push da branch
       await git.push('origin', branchName);
 
-      // Cria o PR
+      // Se já existe PR para esta branch, reutiliza em vez de criar novo
+      const existingPr = await this.github.findPRForBranch(branchName).catch(() => null);
+      if (existingPr) {
+        log.info(`PR #${existingPr.number} já existe — reutilizando`);
+        return { type: 'success', prUrl: existingPr.url };
+      }
+
       const pr = await this.github.createPullRequest(
         issue.number,
         branchName,
@@ -220,10 +232,23 @@ export class AgentRunner {
       };
     }
 
-    // Output ambíguo — verificar estado real da branch antes de pedir ajuda
+    // Output ambíguo — a sessão terminou sem sinalizar o resultado
     log.warn('Agente não sinalizou status corretamente. Output (últimos 500 chars):');
     log.warn(agentOutput.slice(-500));
 
+    // Em modo de retoma: a sessão falhou a aplicar o feedback do utilizador.
+    // Não apontar para o PR existente (que tem implementação errada) — pedir retry explícito.
+    if (isResume) {
+      log.info('Sessão de retoma interrompida sem status — a pedir retry via waiting-for-agent');
+      return {
+        type: 'needs-clarification',
+        question:
+          `🤖 A sessão foi interrompida antes de aplicar o teu feedback.\n\n` +
+          `Para tentar novamente, volta a colocar o label \`waiting-for-agent\` na issue.`,
+      };
+    }
+
+    // Em modo de processamento inicial: verificar estado real da branch
     // 1. Há PR aberto ou fechado para esta branch?
     const pr = await this.github.findPRForBranch(branchName).catch(() => null);
     if (pr) {
@@ -233,7 +258,7 @@ export class AgentRunner {
         type: 'needs-clarification',
         question:
           `🤖 A sessão foi interrompida mas encontrei o PR #${pr.number} (${stateLabel}): ${pr.url}\n\n` +
-          `Por favor, verifique se a implementação está correcta e faça merge se estiver.`,
+          `Se a implementação estiver correcta, podes fazer merge. Se não estiver, comenta o que falta e coloca o label \`waiting-for-agent\`.`,
       };
     }
 

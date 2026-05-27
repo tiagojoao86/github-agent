@@ -23,14 +23,14 @@ export class GitHubClient {
     logger.info(`GitHub Client iniciado. Bot login: ${this.botLogin}`);
   }
 
-  async getIssuesWithLabel(label: string): Promise<GitHubIssue[]> {
+  async getIssuesWithLabel(label: string, limit = env.MAX_ISSUES_PER_RUN): Promise<GitHubIssue[]> {
     logger.debug(`Buscando issue com label: ${label}`);
     const response = await this.octokit.issues.listForRepo({
       owner: this.owner,
       repo: this.repo,
       labels: label,
       state: 'open',
-      per_page: env.MAX_ISSUES_PER_RUN,
+      per_page: limit,
       sort: 'created',
       direction: 'asc',
     });
@@ -108,6 +108,7 @@ export class GitHubClient {
       { name: env.LABEL_READY, color: '0075ca', description: 'Pronto para o agente processar' },
       { name: env.LABEL_PROCESSING, color: 'e4e669', description: 'Sendo processdado pelo agente' },
       { name: env.LABEL_WAITING, color: 'd93f0b', description: 'Aguardando resposta humana' },
+      { name: env.LABEL_WAITING_AGENT, color: 'f29513', description: 'Humano respondeu — aguardando agente retomar' },
       { name: env.LABEL_DONE, color: '0e8a16', description: 'PR ceriado pelo agente' },
     ];
 

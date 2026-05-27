@@ -69,7 +69,7 @@ export class Scheduler {
 
     try {
       await this.processReadyIssues();
-      await this.resumeWaitingIssues();
+      await this.resumeWaitingForAgentIssues();
     } catch (error) {
       logger.error('Erro inesperado no tick', { error });
     } finally {
@@ -100,28 +100,22 @@ export class Scheduler {
     );
   }
 
-  // Retoma issues onde o agente fez uma pergunta e o humano respondeu
-  private async resumeWaitingIssues(): Promise<void> {
-    const waitingIssues = await this.github.getIssuesWithLabel(env.LABEL_WAITING);
+  // Retoma issues marcadas manualmente com 'waiting-for-agent' após resposta humana.
+  // O humano troca o label de 'waiting-for-human' para 'waiting-for-agent' depois de responder,
+  // tornando o handoff explícito e eliminando a detecção automática frágil.
+  private async resumeWaitingForAgentIssues(): Promise<void> {
+    const issues = await this.github.getIssuesWithLabel(env.LABEL_WAITING_AGENT, 50);
 
-    const issuesToResume: GitHubIssue[] = [];
-
-    for (const issue of waitingIssues) {
-      const humanReplies = await this.github.getHumanRepliesAfterBot(issue.number);
-      if (humanReplies.length > 0) {
-        logger.info(`Issue #${issue.number} tem ${humanReplies.length} resposta(s) humana(s) — retomando`);
-        issuesToResume.push(issue);
-      }
-    }
-
-    if (issuesToResume.length === 0) {
-      logger.info('Nenhuma issue waiting-for-human com resposta humana');
+    if (issues.length === 0) {
+      logger.info('Nenhuma issue com waiting-for-agent encontrada');
       return;
     }
 
+    logger.info(`Retomando ${issues.length} issue(s) com waiting-for-agent`);
+
     const limit = pLimit(1);
     await Promise.allSettled(
-      issuesToResume.map((issue) =>
+      issues.map((issue) =>
         limit(() => this.resumeIssueWithIsolation(issue))
       )
     );
@@ -168,27 +162,32 @@ export class Scheduler {
 
   private async resumeIssueWithIsolation(issue: GitHubIssue): Promise<void> {
     try {
-      await this.github.transitionLabel(issue.number, env.LABEL_WAITING, env.LABEL_PROCESSING);
+      await this.github.transitionLabel(issue.number, env.LABEL_WAITING_AGENT, env.LABEL_PROCESSING);
 
-      const humanReplies = await this.github.getHumanRepliesAfterBot(issue.number);
-      const humanContext = humanReplies.map((c) => `${c.author}: ${c.body}`).join('\n\n');
+      // Lê todos os comentários para dar ao agente o histórico completo da conversa
+      const allComments = await this.github.getComments(issue.number);
+      const conversationContext = allComments
+        .map((c) => `${c.isBot ? '🤖 Agente' : `👤 ${c.author}`}: ${c.body}`)
+        .join('\n\n---\n\n');
 
-      const result = await this.agentRunner.resumeIssue(issue, humanContext);
+      const result = await this.agentRunner.resumeIssue(issue, conversationContext);
 
       if (result.type === 'success') {
         await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_DONE);
+        logger.info(`Issue #${issue.number} resolvida. PR: ${result.prUrl}`);
       } else if (result.type === 'needs-clarification') {
         await this.github.postComment(issue.number, result.question);
         await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
       } else if (result.type === 'rate-limit') {
         this.rateLimitState.recordHit(result.retryAfterMs);
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
+        // Volta para waiting-for-agent: o humano não precisa fazer nada, o agente retomará sozinho
+        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING_AGENT);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const stack = error instanceof Error ? error.stack : undefined;
       logger.error(`Erro ao retomar issue #${issue.number}`, { message, stack });
-      await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING)
+      await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING_AGENT)
         .catch(() => { });
     }
   }

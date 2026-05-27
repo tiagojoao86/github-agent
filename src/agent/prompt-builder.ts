@@ -154,13 +154,18 @@ ${issue.body ?? '(Sem descrição)'}
     if (previousConversation) {
       prompt += `
 
-## Contexto da Conversa Anterior
+## Histórico da Conversa e Feedback
 
-Na iteração anterior, você pediu esclarecimento. O humano respondeu:
+Esta issue já foi processada anteriormente. O histórico completo de comentários está abaixo.
+Lê com atenção — pode conter feedback sobre o que está errado na implementação atual ou
+instruções adicionais do utilizador que ainda não foram aplicadas.
+
+A branch \`${branchName}\` pode já ter commits ou até um PR aberto. O teu trabalho é
+**aplicar o feedback do utilizador** fazendo novos commits nessa branch.
 
 ${previousConversation}
 
-Use essa informação para retomar e completar a implementação.`;
+Após aplicar as alterações pedidas, faz commit e sinaliza AGENT_STATUS: SUCCESS.`;
     }
 
     return prompt;
