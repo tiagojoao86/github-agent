@@ -56,8 +56,9 @@ export class RepositoryIndexer {
     try {
       collection = await this.chroma.getOrCreateCollection({
         name: this.collectionName,
+        embeddingFunction: { generate: async (_: string[]): Promise<number[][]> => [] },
         metadata: {
-          'hnsw:space': 'cosine', // distância cosseno é melhor para texto/código
+          'hnsw:space': 'cosine',
           repoPath,
           indexedAt: new Date().toISOString(),
         },

@@ -111,6 +111,15 @@ export class AgentRunner {
         })) {
           this.logMessage(message, log);
 
+          // rate_limit_event: Claude Code CLI ficará à espera internamente; abortamos
+          // proactivamente para não gastar o AGENT_TIMEOUT_MS à espera.
+          if (message.type === 'rate_limit_event') {
+            const retryMs = (message.retry_after_ms ?? message.retry_after ?? 0) * 1000;
+            log.warn('rate_limit_event recebido — abortando sessão proactivamente', { retryMs });
+            controller.abort();
+            break;
+          }
+
           if (message.type === 'assistant') {
             const textContent = (message.message?.content ?? [])
               .filter((c: { type: string; text?: string }): c is { type: 'text'; text: string } => c.type === 'text')

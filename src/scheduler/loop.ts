@@ -181,6 +181,7 @@ export class Scheduler {
         await this.github.postComment(issue.number, result.question);
         await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
       } else if (result.type === 'rate-limit') {
+        this.rateLimitState.recordHit(result.retryAfterMs);
         await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
       }
     } catch (error) {

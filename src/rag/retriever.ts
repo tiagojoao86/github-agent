@@ -49,14 +49,27 @@ export class RagEngine {
     // Gera embedding da query
     const queryEmbedding = await this.generateQueryEmbedding(query);
 
+    // Versões recentes do chromadb requerem uma embeddingFunction mesmo quando passamos
+    // queryEmbeddings diretamente — usamos um no-op para satisfazer o contrato sem
+    // depender do @chroma-core/default-embed que não está instalado.
+    const noopEmbeddingFn = {
+      generate: async (_texts: string[]): Promise<number[][]> => [],
+    };
+
     // Busca no ChromaDB
     let collection;
     try {
-      collection = await this.chroma.getCollection({ name: this.collectionName });
+      collection = await this.chroma.getCollection({
+        name: this.collectionName,
+        embeddingFunction: noopEmbeddingFn,
+      });
     } catch (error: any) {
       if (error?.name === 'ChromaNotFoundError' || error?.message?.includes('could not be found')) {
         await this.ensureIndexed();
-        collection = await this.chroma.getCollection({ name: this.collectionName });
+        collection = await this.chroma.getCollection({
+          name: this.collectionName,
+          embeddingFunction: noopEmbeddingFn,
+        });
       } else {
         throw error;
       }
