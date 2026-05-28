@@ -55,6 +55,7 @@ services:
       CHROMA_URL: http://chromadb:8000
       OLLAMA_URL: http://ollama:11434
       REPO_LOCAL_PATH: /workspace/repo
+      TZ: America/Sao_Paulo
     env_file:
       - .env
     volumes:

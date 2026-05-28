@@ -19,9 +19,6 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# Instala o claude CLI globalmente para garantir disponibilidade no PATH
-RUN npm install -g @anthropic-ai/claude-code
-
 COPY --from=builder /app/dist ./dist
 
 RUN mkdir -p logs

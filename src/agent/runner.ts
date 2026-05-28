@@ -335,7 +335,7 @@ Por favor, responda a este comentário com o esclarecimento e serei retomado aut
     cwd: string;
     abortController: AbortController;
   }): AsyncIterable<any> {
-    const claudeBin = process.env.CLAUDE_BIN ?? 'claude';
+    const claudeBin = process.env.CLAUDE_BIN ?? '/app/node_modules/.bin/claude';
 
     const spawnEnv = { ...process.env };
 

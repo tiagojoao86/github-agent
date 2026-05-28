@@ -16,8 +16,6 @@
   "license": "ISC",
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.1.145",
-    "@anthropic-ai/sdk": "^0.95.2",
-    "@chroma-core/default-embed": "^0.1.9",
     "@octokit/rest": "^22.0.1",
     "chromadb": "^3.4.3",
     "dotenv": "^17.4.2",

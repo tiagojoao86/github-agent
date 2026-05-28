@@ -12,7 +12,7 @@ export class GitHubClient {
   private botLogin: string = '';
 
   constructor() {
-    this.octokit = new Octokit({ auth: env.GITHUB_TOKEN });
+    this.octokit = new Octokit({ auth: env.GITHUB_TOKEN, request: { timeout: 30000 } });
     this.owner = env.GITHUB_OWNER;
     this.repo = env.GITHUB_REPO;
   }
