@@ -49,6 +49,8 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+    ports:
+      - "${UI_PORT:-3000}:${UI_PORT:-3000}"
     environment:
       NODE_ENV: production
       LOG_LEVEL: info

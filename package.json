@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "build": "tsc",
+    "build": "tsc && cp -r src/ui/public dist/ui/public",
     "test": "jest",
     "index:repo": "tsx src/rag/indexer.ts"
   },
@@ -19,13 +19,17 @@
     "@octokit/rest": "^22.0.1",
     "chromadb": "^3.4.3",
     "dotenv": "^17.4.2",
+    "express": "^5.2.1",
     "p-limit": "^7.3.0",
     "simple-git": "^3.36.0",
-    "winston": "^3.19.0"
+    "winston": "^3.19.0",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/jest": "^30.0.0",
     "@types/node": "^25.7.0",
+    "@types/ws": "^8.18.1",
     "jest": "^30.4.2",
     "ts-jest": "^29.4.9",
     "tsx": "^4.21.0",

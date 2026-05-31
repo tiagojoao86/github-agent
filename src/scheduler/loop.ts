@@ -1,5 +1,6 @@
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { eventBus } from '../ui/event-bus.js';
 import { GitHubClient } from '../github/client.js';
 import { AgentRunner } from '../agent/runner.js';
 import { RagEngine } from '../rag/retriever.js';
@@ -78,6 +79,7 @@ export class Scheduler {
     const startTime = Date.now();
     this.tickStartedAt = startTime;
     logger.info('=== Início do tick ===');
+    eventBus.publish({ type: 'tick_start', timestamp: new Date().toISOString() });
 
     try {
       await this.processReadyIssues();
@@ -89,6 +91,7 @@ export class Scheduler {
       this.tickStartedAt = null;
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       logger.info(`=== Fim do tick (${elapsed}s) ===`);
+      eventBus.publish({ type: 'tick_end', elapsed: `${elapsed}s`, timestamp: new Date().toISOString() });
     }
   }
 

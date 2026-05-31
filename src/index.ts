@@ -4,8 +4,11 @@ import { RagEngine } from "./rag/retriever.js";
 import { AgentRunner } from "./agent/runner.js";
 import { Scheduler } from "./scheduler/loop.js";
 import { logger } from "./utils/logger.js";
+import { startUIServer } from "./ui/server.js";
 
 async function main(): Promise<void> {
+  startUIServer(env.UI_PORT);
+
   logger.info('Github Agent iniciando...', {
     repo: `${env.GITHUB_OWNER}/${env.GITHUB_REPO}`,
     pollInterval: env.POLL_INTERVAL_MINUTES,

@@ -8,6 +8,7 @@ import { PromptBuilder } from './prompt-builder.js';
 import { isRateLimitError, parseRetryAfter } from './rate-limit.js';
 import { GitHubIssue } from '../github/model/gihub-issue.js';
 import { simpleGit, SimpleGit } from 'simple-git';
+import { eventBus, TokenUsage } from '../ui/event-bus.js';
 
 // Os três possíveis resultados de uma sessão do agente
 export type AgentResult =
@@ -89,10 +90,12 @@ export class AgentRunner {
   ): Promise<AgentResult> {
     const log = createContextLogger({ issueNumber: issue.number, phase: 'agent-session' });
 
-    // Coleta todo o texto gerado pelo agente para análise posterior
     let fullAgentOutput = '';
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
+    const running: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
+
+    const now = () => new Date().toISOString();
+
+    eventBus.publish({ type: 'session_start', issueNumber: issue.number, phase: isResume ? 'resume' : 'process', timestamp: now() });
 
     try {
       log.info('Iniciando sessão do Claude Code');
@@ -110,7 +113,8 @@ export class AgentRunner {
           cwd: env.REPO_LOCAL_PATH,
           abortController: controller,
         })) {
-          this.logMessage(message, log);
+          this.logMessage(message, log, issue.number, running);
+
 
           // rate_limit_event: só abortar se houver tempo de espera real.
           // Com retryMs: 0 é um evento informativo — o CLI trata internamente e continua.
@@ -122,7 +126,6 @@ export class AgentRunner {
               controller.abort();
               break;
             }
-            // retryMs === 0: evento informativo, deixar o CLI continuar
             continue;
           }
 
@@ -135,11 +138,27 @@ export class AgentRunner {
           }
 
           if (message.message?.usage) {
-            totalInputTokens += message.message.usage.input_tokens ?? 0;
-            totalOutputTokens += message.message.usage.output_tokens ?? 0;
+            const u = message.message.usage;
+            const msgUsage: TokenUsage = {
+              input: u.input_tokens ?? 0,
+              output: u.output_tokens ?? 0,
+              cacheRead: u.cache_read_input_tokens ?? 0,
+              cacheCreate: u.cache_creation_input_tokens ?? 0,
+            };
+            running.input    += msgUsage.input;
+            running.output   += msgUsage.output;
+            running.cacheRead += msgUsage.cacheRead;
+            running.cacheCreate += msgUsage.cacheCreate;
+            eventBus.publish({
+              type: 'agent_tokens',
+              issueNumber: issue.number,
+              usage: msgUsage,
+              runningTotal: { ...running },
+              timestamp: now(),
+            });
           }
 
-          if (totalInputTokens + totalOutputTokens > env.MAX_TOKENS_PER_SESSION) {
+          if (running.input + running.output > env.MAX_TOKENS_PER_SESSION) {
             log.warn('Limite de tokens atingido — abortando sessão');
             controller.abort();
             break;
@@ -149,27 +168,36 @@ export class AgentRunner {
         clearTimeout(timeoutId);
       }
 
+      // O AbortError do spawn é engolido pelo proc.on('error', () => {}),
+      // então o loop termina normalmente. Detectamos o timeout aqui.
+      if (controller.signal.aborted) {
+        log.warn('Sessão encerrada por timeout — devolvendo para fila');
+        eventBus.publish({ type: 'session_end', issueNumber: issue.number, result: 'rate-limit', totalTokens: { ...running }, timestamp: now() });
+        return { type: 'rate-limit' };
+      }
+
       log.info(
-        `Sessão concluída. Tokens: ${totalInputTokens} input + ${totalOutputTokens} output`
+        `Sessão concluída. Tokens: ${running.input} input + ${running.output} output`
       );
 
       // Analisa o output do agente para determinar o resultado
-      return await this.parseAgentResult(issue, branchName, fullAgentOutput, log, isResume);
+      const result = await this.parseAgentResult(issue, branchName, fullAgentOutput, log, isResume);
+      eventBus.publish({ type: 'session_end', issueNumber: issue.number, result: result.type, totalTokens: { ...running }, timestamp: now() });
+      return result;
     } catch (error) {
       if (isRateLimitError(error)) {
         log.warn('Rate limit detectado durante sessão do agente');
-        return {
-          type: 'rate-limit',
-          retryAfterMs: parseRetryAfter(error),
-        };
+        eventBus.publish({ type: 'session_end', issueNumber: issue.number, result: 'rate-limit', totalTokens: { ...running }, timestamp: now() });
+        return { type: 'rate-limit', retryAfterMs: parseRetryAfter(error) };
       }
 
       if (error instanceof Error && error.name === 'AbortError') {
         log.warn('Sessão abortada por timeout');
-        // Trata timeout como rate-limit para retry na próxima iteração
+        eventBus.publish({ type: 'session_end', issueNumber: issue.number, result: 'rate-limit', totalTokens: { ...running }, timestamp: now() });
         return { type: 'rate-limit' };
       }
 
+      eventBus.publish({ type: 'session_end', issueNumber: issue.number, result: 'error', totalTokens: { ...running }, timestamp: now() });
       throw error;
     }
   }
@@ -186,7 +214,7 @@ export class AgentRunner {
       log.info('Agente sinalizou sucesso — verificando branch e PR');
 
       const git = simpleGit(env.REPO_LOCAL_PATH);
-      const log_result = await git.log({ from: 'origin/main', to: branchName }).catch(() => null);
+      const log_result = await git.log({ from: 'origin/${env.BASE_BRANCH}', to: branchName }).catch(() => null);
 
       if (!log_result || log_result.total === 0) {
         log.warn('Agente sinalizou sucesso mas não há commits — tratando como clarification');
@@ -236,19 +264,13 @@ export class AgentRunner {
     log.warn('Agente não sinalizou status corretamente. Output (últimos 500 chars):');
     log.warn(agentOutput.slice(-500));
 
-    // Em modo de retoma: a sessão falhou a aplicar o feedback do utilizador.
-    // Não apontar para o PR existente (que tem implementação errada) — pedir retry explícito.
-    if (isResume) {
-      log.info('Sessão de retoma interrompida sem status — a pedir retry via waiting-for-agent');
-      return {
-        type: 'needs-clarification',
-        question:
-          `🤖 A sessão foi interrompida antes de aplicar o teu feedback.\n\n` +
-          `Para tentar novamente, volta a colocar o label \`waiting-for-agent\` na issue.`,
-      };
-    }
+    // Trecho final do output para incluir no comentário e dar contexto ao utilizador
+    const outputSnippet = agentOutput.slice(-600).trim();
+    const snippetBlock = outputSnippet
+      ? `\n\n<details><summary>Último output do agente</summary>\n\n${outputSnippet}\n\n</details>`
+      : '';
 
-    // Em modo de processamento inicial: verificar estado real da branch
+    // Verificar estado real da branch (igual para resume e para processamento inicial)
     // 1. Há PR aberto ou fechado para esta branch?
     const pr = await this.github.findPRForBranch(branchName).catch(() => null);
     if (pr) {
@@ -258,20 +280,25 @@ export class AgentRunner {
         type: 'needs-clarification',
         question:
           `🤖 A sessão foi interrompida mas encontrei o PR #${pr.number} (${stateLabel}): ${pr.url}\n\n` +
-          `Se a implementação estiver correcta, podes fazer merge. Se não estiver, comenta o que falta e coloca o label \`waiting-for-agent\`.`,
+          `Se a implementação estiver correcta, podes fazer merge. Se não estiver, comenta o que falta e coloca o label \`waiting-for-agent\`.` +
+          snippetBlock,
       };
     }
 
     // 2. Há commits na branch?
     const git = simpleGit(env.REPO_LOCAL_PATH);
-    const commits = await git.log({ from: 'origin/main', to: branchName }).catch(() => null);
+    const commits = await git.log({ from: 'origin/${env.BASE_BRANCH}', to: branchName }).catch(() => null);
     if (commits && commits.total > 0) {
+      const resumeNote = isResume
+        ? 'A sessão foi interrompida durante a retoma.'
+        : 'A sessão foi interrompida.';
       log.info(`Branch tem ${commits.total} commit(s) mas sem PR — sessão interrompida a meio`);
       return {
         type: 'needs-clarification',
         question:
-          `🤖 A sessão foi interrompida. Encontrei ${commits.total} commit(s) na branch \`${branchName}\` mas sem PR.\n\n` +
-          `Responda com **"continuar"** para criar o PR com o que foi implementado, ou **"recomeçar"** para que eu reanalise a issue do zero.`,
+          `🤖 ${resumeNote} Encontrei ${commits.total} commit(s) na branch \`${branchName}\` mas sem PR.\n\n` +
+          `Responda com **"continuar"** para criar o PR com o que foi implementado, ou **"recomeçar"** para que eu reanalise a issue do zero.` +
+          snippetBlock,
       };
     }
 
@@ -281,7 +308,8 @@ export class AgentRunner {
       type: 'needs-clarification',
       question:
         `🤖 A sessão foi interrompida antes de qualquer implementação na branch \`${branchName}\`.\n\n` +
-        `Responda com **"recomeçar"** para que eu tente novamente.`,
+        `Responda com **"recomeçar"** para que eu tente novamente.` +
+        snippetBlock,
     };
   }
 
@@ -372,8 +400,12 @@ Por favor, responda a este comentário com o esclarecimento e serei retomado aut
 
   private logMessage(
     message: any,
-    log: ReturnType<typeof createContextLogger>
+    log: ReturnType<typeof createContextLogger>,
+    issueNumber: number,
+    _running: TokenUsage,
   ): void {
+    const now = () => new Date().toISOString();
+
     switch (message.type) {
       case 'system':
         log.debug('system message', { subtype: message.subtype });
@@ -381,19 +413,55 @@ Por favor, responda a este comentário com o esclarecimento e serei retomado aut
 
       case 'assistant':
         for (const content of (message.message?.content ?? [])) {
-          if (content.type === 'text' && content.text?.length > 0) {
+          if (content.type === 'thinking' && content.thinking?.length > 0) {
+            log.debug(`Thinking (${content.thinking.length} chars)`);
+            eventBus.publish({
+              type: 'agent_thinking',
+              issueNumber,
+              thinking: content.thinking,
+              tokens: Math.ceil(content.thinking.length / 4),
+              timestamp: now(),
+            });
+          } else if (content.type === 'text' && content.text?.length > 0) {
             log.debug(`Claude: ${content.text.substring(0, 200)}${content.text.length > 200 ? '...' : ''}`);
+            eventBus.publish({
+              type: 'agent_text',
+              issueNumber,
+              text: content.text,
+              timestamp: now(),
+            });
           } else if (content.type === 'tool_use') {
             log.info(`Ferramenta: ${content.name}`, {
               input: JSON.stringify(content.input).substring(0, 200),
+            });
+            eventBus.publish({
+              type: 'agent_tool',
+              issueNumber,
+              name: content.name,
+              input: content.input,
+              timestamp: now(),
             });
           }
         }
         break;
 
-      case 'tool':
-        log.debug('Tool result recebido', { toolUseId: message.tool_use_id });
+      case 'tool': {
+        const rawContent = message.content;
+        const contentStr = Array.isArray(rawContent)
+          ? rawContent.map((c: any) => (c.type === 'text' ? c.text : JSON.stringify(c))).join('\n')
+          : typeof rawContent === 'string'
+          ? rawContent
+          : JSON.stringify(rawContent ?? '');
+        log.debug('Tool result recebido', { toolUseId: message.tool_use_id, preview: contentStr.substring(0, 100) });
+        eventBus.publish({
+          type: 'agent_tool_result',
+          issueNumber,
+          toolUseId: message.tool_use_id ?? '',
+          content: contentStr,
+          timestamp: now(),
+        });
         break;
+      }
 
       default:
         log.debug('Mensagem', { type: message.type });

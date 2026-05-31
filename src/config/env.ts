@@ -43,6 +43,12 @@ export const env = {
   REPO_LOCAL_PATH: requireEnv('REPO_LOCAL_PATH'),
   EMBEDDING_MODEL: optionalEnv('EMBEDDING_MODEL', 'nomic-embed-text'),
 
+  // UI Dashboard
+  UI_PORT: parseInt(optionalEnv('UI_PORT', '3000'), 10),
+
+  // Branch base para criação de branches e PRs
+  BASE_BRANCH: optionalEnv('BASE_BRANCH', 'dev'),
+
   // Labels de controle (não mude sem atualizar o GitHub também)
   LABEL_READY: 'agent-ready',
   LABEL_PROCESSING: 'agent-processing',

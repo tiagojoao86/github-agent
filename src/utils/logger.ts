@@ -1,6 +1,23 @@
 import winston from "winston";
+import Transport from 'winston-transport';
+import { eventBus } from '../ui/event-bus.js';
 
 const isProd = process.env.NODE_ENV === 'production';
+
+class UITransport extends Transport {
+  log(info: any, callback: () => void) {
+    const { level, message, timestamp, ...meta } = info;
+    eventBus.publish({
+      type: 'log',
+      level,
+      message: String(message),
+      meta: meta as Record<string, unknown>,
+      issueNumber: typeof meta.issueNumber === 'number' ? meta.issueNumber : undefined,
+      timestamp: timestamp ?? new Date().toISOString(),
+    });
+    callback();
+  }
+}
 
 export const logger = winston.createLogger({
   level: process.env.LOG_LEVEL ?? 'info',
@@ -29,6 +46,7 @@ export const logger = winston.createLogger({
       maxFiles: 5,
       tailable: true,
     }),
+    new UITransport(),
   ],
 });
 

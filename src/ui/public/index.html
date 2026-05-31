@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <title>github-agent — dashboard</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{
+      font-family:'Menlo','Monaco','Courier New',monospace;
+      font-size:12px;background:#1e1e1e;color:#d4d4d4;
+      height:100vh;display:flex;flex-direction:column;overflow:hidden;
+    }
+
+    /* ── Title bar ── */
+    #titlebar{
+      background:#323233;padding:6px 12px;
+      display:flex;align-items:center;justify-content:space-between;
+      border-bottom:1px solid #474747;flex-shrink:0;
+    }
+    #titlebar .title{font-size:13px;font-weight:500;display:flex;align-items:center;gap:8px}
+    #status-dot{width:8px;height:8px;border-radius:50%;background:#6a9955;transition:background .3s}
+    #status-dot.running{background:#4ec9b0;animation:pulse 1.2s infinite}
+    #status-dot.error{background:#f44747}
+    #conn-badge{font-size:11px;color:#888}
+
+    /* ── Main layout ── */
+    #main{display:flex;flex:1;overflow:hidden}
+
+    /* ── Sidebar ── */
+    #sidebar{
+      width:190px;background:#252526;
+      border-right:1px solid #474747;
+      display:flex;flex-direction:column;flex-shrink:0;
+    }
+    .panel-header{
+      padding:7px 10px;color:#bbb;font-size:11px;
+      text-transform:uppercase;letter-spacing:.08em;
+      border-bottom:1px solid #3c3c3c;flex-shrink:0;
+    }
+    #issue-list{overflow-y:auto;flex:1}
+    .issue-item{
+      padding:5px 10px;cursor:pointer;
+      display:flex;align-items:center;gap:7px;
+      color:#ccc;border-left:2px solid transparent;
+      user-select:none;
+    }
+    .issue-item:hover{background:#2a2d2e}
+    .issue-item.active{background:#094771;border-left-color:#007acc;color:#fff}
+    .issue-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+    .d-running{background:#4ec9b0;animation:pulse 1.2s infinite}
+    .d-success{background:#6a9955}
+    .d-waiting{background:#dcdcaa}
+    .d-error{background:#f44747}
+    .d-idle{background:#555}
+    .issue-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}
+    .issue-phase{font-size:10px;color:#666;margin-top:1px}
+
+    /* ── Content ── */
+    #content{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+    /* ── Token bar ── */
+    #token-bar{
+      background:#2d2d30;border-bottom:1px solid #474747;
+      padding:4px 10px;display:flex;align-items:center;gap:16px;
+      flex-shrink:0;font-size:11px;flex-wrap:wrap;
+    }
+    .tok-group{display:flex;gap:5px;color:#9cdcfe}
+    .tok-group label{color:#666}
+    .tok-group b{color:#9cdcfe}
+    #auto-scroll-btn{
+      margin-left:auto;cursor:pointer;background:transparent;
+      border:1px solid #444;color:#888;padding:1px 8px;
+      font-size:11px;border-radius:2px;font-family:inherit;
+    }
+    #auto-scroll-btn:hover{border-color:#666;color:#ccc}
+    #auto-scroll-btn.on{border-color:#007acc;color:#4ec9b0}
+
+    /* ── Event stream ── */
+    #event-stream{flex:1;overflow-y:auto;background:#1e1e1e;padding:2px 0}
+
+    .ev{
+      padding:1px 10px;display:flex;gap:8px;
+      line-height:1.55;border-left:2px solid transparent;
+    }
+    .ev:hover{background:#252526}
+    .ev-time{color:#555;flex-shrink:0;font-size:11px;width:58px;padding-top:1px}
+    .ev-body{flex:1;word-break:break-word;min-width:0}
+
+    /* tool call */
+    .ev.e-tool{border-left-color:#264f78}
+    .ev.e-tool_result{border-left-color:#264f78}
+    /* thinking */
+    .ev.e-thinking{border-left-color:#5a3a8a}
+    /* text */
+    .ev.e-text{border-left-color:#3c3c1e}
+    /* tokens */
+    .ev.e-tokens{border-left-color:#2a2a00}
+    /* session */
+    .ev.e-session_start{border-left-color:#007acc;background:#0d1117}
+    .ev.e-session_end{border-left-color:#007acc;background:#0d1117}
+    /* tick */
+    .ev.e-tick{background:#1a1a1a}
+    .ev.e-tick .ev-body{color:#3c3c3c;font-size:10px;letter-spacing:.05em}
+    /* log levels */
+    .ev.e-log-debug .ev-body{color:#555;font-size:11px}
+    .ev.e-log-info .ev-body{color:#9cdcfe}
+    .ev.e-log-warn .ev-body{color:#dcdcaa}
+    .ev.e-log-error .ev-body{color:#f44747}
+
+    /* collapsible */
+    .collapsible{cursor:pointer;user-select:none}
+    .collapsible:hover .c-label{text-decoration:underline}
+    .c-arrow{color:#555;font-size:10px;margin-right:3px;display:inline-block;transition:transform .15s}
+    .c-arrow.open{transform:rotate(90deg)}
+    .c-body{
+      display:none;margin-top:3px;padding:5px 8px;
+      background:#252526;border-radius:3px;
+      font-size:11px;white-space:pre-wrap;
+      overflow:auto;max-height:180px;
+      color:#9cdcfe;line-height:1.4;
+    }
+    .c-body.open{display:block}
+
+    .tool-name{color:#4ec9b0;font-weight:bold}
+    .tool-hint{color:#555;font-size:11px}
+    .result-hint{color:#9cdcfe}
+    .thinking-label{color:#9b7ec8}
+    .thinking-body{color:#b392d4;font-style:italic}
+    .tokens-line{color:#888;font-size:11px}
+    .tok-in{color:#9cdcfe}
+    .tok-out{color:#4ec9b0}
+    .tok-cache{color:#6a9955}
+    .tok-total{color:#dcdcaa}
+    .session-line{color:#4ec9b0;font-weight:bold;font-size:12px}
+    .session-end-ok{color:#6a9955}
+    .session-end-wait{color:#dcdcaa}
+    .session-end-err{color:#f44747}
+    .text-preview{color:#d4d4d4}
+    .text-prefix{color:#ce9178;margin-right:4px}
+
+    /* ── Status bar ── */
+    #statusbar{
+      background:#007acc;color:#fff;
+      padding:2px 10px;font-size:11px;
+      display:flex;gap:16px;flex-shrink:0;
+    }
+    #statusbar span:last-child{margin-left:auto;color:rgba(255,255,255,.7)}
+
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+    ::-webkit-scrollbar{width:6px;height:6px}
+    ::-webkit-scrollbar-track{background:#1e1e1e}
+    ::-webkit-scrollbar-thumb{background:#424242;border-radius:3px}
+    ::-webkit-scrollbar-thumb:hover{background:#555}
+  </style>
+</head>
+<body>
+
+<div id="titlebar">
+  <div class="title">
+    <span id="status-dot"></span>
+    github-agent
+  </div>
+  <span id="conn-badge">⬤ conectando...</span>
+</div>
+
+<div id="main">
+  <div id="sidebar">
+    <div class="panel-header">Issues</div>
+    <div id="issue-list">
+      <div style="color:#555;padding:10px 10px;font-size:11px">Aguardando eventos...</div>
+    </div>
+  </div>
+
+  <div id="content">
+    <div id="token-bar">
+      <div class="tok-group"><label>input</label><b id="t-in">—</b></div>
+      <div class="tok-group"><label>output</label><b id="t-out">—</b></div>
+      <div class="tok-group"><label>cache↩</label><b id="t-cache">—</b></div>
+      <div class="tok-group"><label>total</label><b id="t-total">—</b></div>
+      <button id="auto-scroll-btn" class="on" onclick="toggleScroll()">↓ auto-scroll</button>
+    </div>
+    <div id="event-stream"></div>
+  </div>
+</div>
+
+<div id="statusbar">
+  <span id="st-text">Aguardando conexão...</span>
+  <span id="st-count">0 eventos</span>
+</div>
+
+<script>
+// ── state ────────────────────────────────────────────────────────────────────
+const issues = new Map();   // num -> { status, phase, tokIn, tokOut }
+let selected = null;        // null = all
+let autoScroll = true;
+let evCount = 0;
+const allEvents = [];
+const MAX_EVENTS = 3000;
+let sessionTok = { input:0, output:0, cacheRead:0, cacheCreate:0 };
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const fmt = n => (n == null || isNaN(n)) ? '—' : n.toLocaleString('pt-BR');
+const esc = s => String(s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const ts = t => {
+  if (!t) return '';
+  const d = new Date(t);
+  return d.toLocaleTimeString('pt',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+};
+
+function toggleScroll(){
+  autoScroll = !autoScroll;
+  const btn = $('auto-scroll-btn');
+  btn.classList.toggle('on', autoScroll);
+  btn.textContent = autoScroll ? '↓ auto-scroll' : '↓ pausado';
+}
+
+// ── token bar ────────────────────────────────────────────────────────────────
+function updateTokenBar(usage){
+  if(!usage) return;
+  sessionTok.input    += usage.input    || 0;
+  sessionTok.output   += usage.output   || 0;
+  sessionTok.cacheRead += usage.cacheRead || 0;
+  $('t-in').textContent    = fmt(sessionTok.input);
+  $('t-out').textContent   = fmt(sessionTok.output);
+  $('t-cache').textContent = fmt(sessionTok.cacheRead) === '0' ? '—' : fmt(sessionTok.cacheRead);
+  $('t-total').textContent = fmt(sessionTok.input + sessionTok.output);
+}
+
+function resetTokenBar(){
+  sessionTok = { input:0, output:0, cacheRead:0, cacheCreate:0 };
+  ['t-in','t-out','t-cache','t-total'].forEach(id => $(id).textContent = '—');
+}
+
+// ── issue sidebar ────────────────────────────────────────────────────────────
+function getOrCreate(num){
+  if(!issues.has(num)) issues.set(num, { status:'idle', phase:'', tokIn:0, tokOut:0 });
+  return issues.get(num);
+}
+
+function rebuildSidebar(){
+  const list = $('issue-list');
+  if(issues.size === 0){
+    list.innerHTML = '<div style="color:#555;padding:10px;font-size:11px">Aguardando eventos...</div>';
+    return;
+  }
+  const order = { running:0, waiting:1, error:2, success:3, idle:4 };
+  const sorted = [...issues.entries()].sort((a,b) => {
+    const d = (order[a[1].status]??5) - (order[b[1].status]??5);
+    return d !== 0 ? d : b[0] - a[0];
+  });
+
+  list.innerHTML = '';
+  for(const [num, info] of sorted){
+    const div = document.createElement('div');
+    div.className = 'issue-item' + (selected === num ? ' active' : '');
+    div.innerHTML =
+      `<span class="issue-dot d-${info.status}"></span>` +
+      `<span class="issue-label">#${num}${info.phase ? ' · '+info.phase : ''}</span>`;
+    div.onclick = () => selectIssue(selected === num ? null : num);
+    list.appendChild(div);
+  }
+}
+
+function selectIssue(num){
+  selected = num;
+  rebuildSidebar();
+  renderAll();
+}
+
+// ── rendering ────────────────────────────────────────────────────────────────
+function collapsible(label, body, extraClass=''){
+  const uid = 'c' + Math.random().toString(36).slice(2);
+  return `<span class="collapsible ${extraClass}" onclick="toggle('${uid}')">` +
+    `<span class="c-arrow" id="a${uid}">▶</span>${label}</span>` +
+    `<div class="c-body" id="${uid}">${body}</div>`;
+}
+
+function toggle(uid){
+  const body = document.getElementById(uid);
+  const arr  = document.getElementById('a'+uid);
+  if(!body || !arr) return;
+  body.classList.toggle('open');
+  arr.classList.toggle('open');
+}
+
+function buildRow(ev){
+  if(selected !== null && ev.issueNumber !== undefined && ev.issueNumber !== selected){
+    if(ev.type !== 'tick_start' && ev.type !== 'tick_end') return null;
+  }
+
+  const time = `<span class="ev-time">${ts(ev.timestamp)}</span>`;
+  let cls = '';
+  let body = '';
+
+  switch(ev.type){
+
+    case 'agent_tool':{
+      cls = 'e-tool';
+      const inp = JSON.stringify(ev.input, null, 2);
+      const label =
+        `<span class="tool-name">${esc(ev.name)}</span>` +
+        `<span class="tool-hint"> — input</span>`;
+      body = collapsible(label, esc(inp));
+      break;
+    }
+
+    case 'agent_tool_result':{
+      cls = 'e-tool_result';
+      const preview = ev.content.length > 80 ? ev.content.slice(0,80)+'…' : ev.content;
+      const label = `<span class="result-hint">↩ resultado</span> <span class="tool-hint">${esc(preview)}</span>`;
+      body = collapsible(label, esc(ev.content));
+      break;
+    }
+
+    case 'agent_thinking':{
+      cls = 'e-thinking';
+      const preview = ev.thinking.length > 90 ? ev.thinking.slice(0,90)+'…' : ev.thinking;
+      const label =
+        `<span class="thinking-label">💭 thinking</span>` +
+        `<span class="tool-hint"> (${fmt(ev.tokens)} tk) — ${esc(preview)}</span>`;
+      body = collapsible(label, `<span class="thinking-body">${esc(ev.thinking)}</span>`);
+      break;
+    }
+
+    case 'agent_text':{
+      cls = 'e-text';
+      const preview = ev.text.length > 250 ? ev.text.slice(0,250)+'…' : ev.text;
+      body = `<span class="text-prefix">◈</span><span class="text-preview">${esc(preview)}</span>`;
+      break;
+    }
+
+    case 'agent_tokens':{
+      cls = 'e-tokens';
+      const u = ev.usage;
+      const r = ev.runningTotal;
+      const parts = [
+        `<span class="tok-in">↑${fmt(u.input)}</span>`,
+        `<span class="tok-out">↓${fmt(u.output)}</span>`,
+      ];
+      if(u.cacheRead) parts.push(`<span class="tok-cache">↩${fmt(u.cacheRead)}</span>`);
+      parts.push(`<span class="tok-total">∑${fmt(r.input+r.output)}</span>`);
+      body = `<span class="tokens-line">tokens  ${parts.join('  ')}</span>`;
+      break;
+    }
+
+    case 'session_start':{
+      cls = 'e-session_start';
+      body = `<span class="session-line">▶ issue #${ev.issueNumber} — ${esc(ev.phase)}</span>`;
+      break;
+    }
+
+    case 'session_end':{
+      cls = 'e-session_end';
+      const t = ev.totalTokens;
+      const resultCls = ev.result === 'success' ? 'session-end-ok'
+        : ev.result === 'needs-clarification' ? 'session-end-wait'
+        : 'session-end-err';
+      body = `<span class="${resultCls}">■ issue #${ev.issueNumber} — ${esc(ev.result)}` +
+             `  (${fmt(t.input+t.output)} tokens total)</span>`;
+      break;
+    }
+
+    case 'log':{
+      cls = `e-log-${ev.level}`;
+      const prefix = ev.issueNumber
+        ? `<span style="color:#555">#${ev.issueNumber} </span>`
+        : '';
+      const metaKeys = Object.keys(ev.meta||{}).filter(k=>k!=='issueNumber'&&k!=='phase');
+      const metaStr = metaKeys.length
+        ? `  <span style="color:#444">${esc(JSON.stringify(
+            Object.fromEntries(metaKeys.map(k=>[k,(ev.meta||{})[k]]))))}</span>`
+        : '';
+      body = prefix + esc(ev.message) + metaStr;
+      break;
+    }
+
+    case 'tick_start':
+      cls = 'e-tick';
+      body = '─────── tick ───────';
+      break;
+
+    case 'tick_end':
+      cls = 'e-tick';
+      body = `─────── tick end (${esc(ev.elapsed||'')}) ───────`;
+      break;
+
+    default:
+      return null;
+  }
+
+  const div = document.createElement('div');
+  div.className = `ev ${cls}`;
+  div.innerHTML = time + `<span class="ev-body">${body}</span>`;
+  return div;
+}
+
+function renderAll(){
+  const stream = $('event-stream');
+  stream.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  for(const ev of allEvents){
+    const el = buildRow(ev);
+    if(el) frag.appendChild(el);
+  }
+  stream.appendChild(frag);
+  if(autoScroll) stream.scrollTop = stream.scrollHeight;
+}
+
+// ── ingestion ────────────────────────────────────────────────────────────────
+function ingest(ev){
+  allEvents.push(ev);
+  if(allEvents.length > MAX_EVENTS) allEvents.shift();
+  evCount++;
+  $('st-count').textContent = evCount + ' eventos';
+
+  // update issue state
+  if(ev.issueNumber !== undefined){
+    const info = getOrCreate(ev.issueNumber);
+    if(ev.type === 'session_start'){
+      info.status = 'running';
+      info.phase  = ev.phase;
+      resetTokenBar();
+    } else if(ev.type === 'session_end'){
+      info.status = ev.result === 'success' ? 'success'
+        : (ev.result === 'needs-clarification' || ev.result === 'rate-limit') ? 'waiting'
+        : 'error';
+      info.phase = ev.result;
+    } else if(ev.type === 'agent_tokens'){
+      updateTokenBar(ev.usage);
+    }
+    rebuildSidebar();
+  }
+
+  // update status dot
+  const anyRunning = [...issues.values()].some(i=>i.status==='running');
+  $('status-dot').className = anyRunning ? 'running' : '';
+
+  // append row
+  const stream = $('event-stream');
+  const el = buildRow(ev);
+  if(el){
+    stream.appendChild(el);
+    if(autoScroll) stream.scrollTop = stream.scrollHeight;
+  }
+}
+
+// ── websocket ────────────────────────────────────────────────────────────────
+function connect(){
+  const ws = new WebSocket(`ws://${location.host}`);
+
+  ws.onopen = () => {
+    $('conn-badge').textContent = '⬤ conectado';
+    $('conn-badge').style.color = '#6a9955';
+    $('st-text').textContent = 'Conectado';
+  };
+
+  ws.onmessage = e => {
+    try { ingest(JSON.parse(e.data)); } catch {}
+  };
+
+  ws.onclose = () => {
+    $('conn-badge').textContent = '⬤ desconectado';
+    $('conn-badge').style.color = '#f44747';
+    $('st-text').textContent = 'Reconectando...';
+    setTimeout(connect, 3000);
+  };
+
+  ws.onerror = () => ws.close();
+}
+
+connect();
+</script>
+</body>
+</html>

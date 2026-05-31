@@ -187,17 +187,10 @@ export class GitHubClient {
   async createBranch(issueNumber: number): Promise<string> {
     const branchName = this.getBranchName(issueNumber);
 
-    // Obtém o SHA do HEAD da branch default (main/master)
-    const { data: repo } = await this.octokit.repos.get({
-      owner: this.owner,
-      repo: this.repo,
-    });
-    const defaultBranch = repo.default_branch;
-
     const { data: ref } = await this.octokit.git.getRef({
       owner: this.owner,
       repo: this.repo,
-      ref: `heads/${defaultBranch}`,
+      ref: `heads/${env.BASE_BRANCH}`,
     });
 
     try {
@@ -207,7 +200,7 @@ export class GitHubClient {
         ref: `refs/heads/${branchName}`,
         sha: ref.object.sha,
       });
-      logger.info(`Branch criada: ${branchName} a partir de ${defaultBranch}`);
+      logger.info(`Branch criada: ${branchName} a partir de ${env.BASE_BRANCH}`);
     } catch (error: unknown) {
       if (isOctokitError(error) && error.status === 422) {
         logger.warn(`Branch ${branchName} já existe — reutilizando`);
@@ -247,18 +240,13 @@ export class GitHubClient {
     title: string,
     body: string
   ): Promise<PullRequestResult> {
-    const { data: repo } = await this.octokit.repos.get({
-      owner: this.owner,
-      repo: this.repo,
-    });
-
     const { data: pr } = await this.octokit.pulls.create({
       owner: this.owner,
       repo: this.repo,
       title,
       body,
       head: branchName,
-      base: repo.default_branch,
+      base: env.BASE_BRANCH,
     });
 
     logger.info(`PR #${pr.number} criado: ${pr.html_url}`);
