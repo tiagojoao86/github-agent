@@ -214,7 +214,7 @@ export class AgentRunner {
       log.info('Agente sinalizou sucesso — verificando branch e PR');
 
       const git = simpleGit(env.REPO_LOCAL_PATH);
-      const log_result = await git.log({ from: 'origin/${env.BASE_BRANCH}', to: branchName }).catch(() => null);
+      const log_result = await git.log({ from: `origin/${env.BASE_BRANCH}`, to: branchName }).catch(() => null);
 
       if (!log_result || log_result.total === 0) {
         log.warn('Agente sinalizou sucesso mas não há commits — tratando como clarification');
@@ -287,7 +287,7 @@ export class AgentRunner {
 
     // 2. Há commits na branch?
     const git = simpleGit(env.REPO_LOCAL_PATH);
-    const commits = await git.log({ from: 'origin/${env.BASE_BRANCH}', to: branchName }).catch(() => null);
+    const commits = await git.log({ from: `origin/${env.BASE_BRANCH}`, to: branchName }).catch(() => null);
     if (commits && commits.total > 0) {
       const resumeNote = isResume
         ? 'A sessão foi interrompida durante a retoma.'
