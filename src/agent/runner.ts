@@ -7,6 +7,7 @@ import { RagEngine } from '../rag/retriever.js';
 import { PromptBuilder } from './prompt-builder.js';
 import { isRateLimitError, parseRetryAfter } from './rate-limit.js';
 import { GitHubIssue } from '../github/model/gihub-issue.js';
+import { PRReviewComment } from '../github/model/pr-review-comment.js';
 import { simpleGit, SimpleGit } from 'simple-git';
 import { eventBus, TokenUsage } from '../ui/event-bus.js';
 
@@ -78,7 +79,32 @@ export class AgentRunner {
     );
 
     log.info('Retomando issue com contexto da resposta humana');
-    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, true);
+    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, true, false);
+  }
+
+  async reviewIssue(issue: GitHubIssue, prNumber: number, reviewComments: PRReviewComment[]): Promise<AgentResult> {
+    const log = createContextLogger({ issueNumber: issue.number, phase: 'review' });
+
+    const branchName = this.github.getBranchName(issue.number);
+
+    const git = simpleGit(env.REPO_LOCAL_PATH);
+    await git.fetch('origin');
+    await git.checkout(branchName);
+
+    const queryText = `${issue.title} ${issue.body ?? ''} ${reviewComments.map(c => c.body).join(' ')}`;
+    const ragContext = await this.ragEngine.retrieveContext(queryText);
+
+    const prompt = await this.promptBuilder.buildForPRReview(
+      issue,
+      ragContext,
+      env.REPO_LOCAL_PATH,
+      branchName,
+      prNumber,
+      reviewComments
+    );
+
+    log.info(`Aplicando review do PR #${prNumber} (${reviewComments.length} comentários)`);
+    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, false, true);
   }
 
   private async runAgentSession(
@@ -86,7 +112,8 @@ export class AgentRunner {
     branchName: string,
     systemPrompt: string,
     userPrompt: string,
-    isResume = false
+    isResume = false,
+    isReview = false
   ): Promise<AgentResult> {
     const log = createContextLogger({ issueNumber: issue.number, phase: 'agent-session' });
 
@@ -194,7 +221,7 @@ export class AgentRunner {
       });
 
       // Analisa o output do agente para determinar o resultado
-      const result = await this.parseAgentResult(issue, branchName, fullAgentOutput, log, isResume);
+      const result = await this.parseAgentResult(issue, branchName, fullAgentOutput, log, isResume, isReview);
       eventBus.publish({ type: 'session_end', issueNumber: issue.number, result: result.type, totalTokens: { ...running }, timestamp: now() });
       return result;
     } catch (error) {
@@ -220,7 +247,8 @@ export class AgentRunner {
     branchName: string,
     agentOutput: string,
     log: ReturnType<typeof createContextLogger>,
-    isResume = false
+    isResume = false,
+    isReview = false
   ): Promise<AgentResult> {
     // Procura pelos sinalizadores de status no output do agente
     if (agentOutput.includes('AGENT_STATUS: SUCCESS')) {
@@ -249,6 +277,16 @@ export class AgentRunner {
       const filesChanged = diffOutput.split('\n').map(f => f.trim()).filter(Boolean);
 
       const summary = this.extractSummary(agentOutput);
+
+      // No modo review o PR já existe — apenas posta comentário e retorna
+      if (isReview) {
+        const existingPr = await this.github.findPRForBranch(branchName).catch(() => null);
+        const prUrl = existingPr?.url ?? `(branch: ${branchName})`;
+        log.info(`Review aplicado. PR: ${prUrl}`);
+        await this.github.postReviewAppliedComment(issue.number, summary, prUrl, filesChanged)
+          .catch(err => log.warn('Falha ao postar comentário de review aplicado', { err }));
+        return { type: 'success', prUrl };
+      }
 
       // Se já existe PR para esta branch, reutiliza em vez de criar novo
       const existingPr = await this.github.findPRForBranch(branchName).catch(() => null);
@@ -359,7 +397,7 @@ export class AgentRunner {
 
 Este PR foi criado automaticamente pelo agente de issues.
 
-**Issue resolvida:** #${issue.number} — ${issue.title}
+Closes #${issue.number}
 
 ${summarySection}
 ${fileSection}

@@ -7,6 +7,7 @@ import { logger } from '../utils/logger.js';
 import { systemPrompt } from './prompt-base.js';
 import { formatConversationForPrompt, buildConversationHistory } from './conversation.js';
 import type { GitHubComment } from '../github/model/github-comment.js';
+import type { PRReviewComment } from '../github/model/pr-review-comment.js';
 
 export interface AgentPrompt {
   systemPrompt: string;
@@ -96,6 +97,87 @@ export class PromptBuilder {
     });
 
     return { systemPrompt, userPrompt };
+  }
+
+  async buildForPRReview(
+    issue: GitHubIssue,
+    ragContext: RetrievalResult,
+    repoPath: string,
+    branchName: string,
+    prNumber: number,
+    reviewComments: PRReviewComment[]
+  ): Promise<AgentPrompt> {
+    const projectContext = await this.getProjectContext(repoPath);
+    const ragSection = this.formatRagContext(ragContext);
+    const reviewSection = this.formatReviewComments(reviewComments);
+
+    const userPrompt = `## Contexto do Projeto
+
+${projectContext}
+
+## Arquivos Relevantes (recuperados por busca semântica)
+
+${ragSection}
+
+## Issue Original
+
+**Issue #${issue.number}:** ${issue.title}
+**Descrição:** ${issue.body ?? '(Sem descrição)'}
+
+## Instruções de Execução
+
+O PR #${prNumber} já existe para esta issue. A tua tarefa é **aplicar as correções pedidas nos comentários de review** abaixo.
+
+1. Vá para a branch correta:
+   \`\`\`bash
+   cd ${env.REPO_LOCAL_PATH}
+   git checkout ${branchName}
+   \`\`\`
+
+2. Leia os arquivos mencionados nos comentários e aplica as correções
+
+3. Faça commit das alterações:
+   \`\`\`bash
+   git add -A
+   git commit -m "fix: apply PR review feedback for issue #${issue.number}"
+   \`\`\`
+
+4. **Não cries um novo PR** — o PR #${prNumber} já existe e será atualizado automaticamente com o push.
+
+5. Sinaliza o resultado com AGENT_STATUS conforme as instruções do sistema.
+
+## Comentários de Review a Aplicar
+
+${reviewSection}`;
+
+    return { systemPrompt: this.buildSystemPrompt(), userPrompt };
+  }
+
+  private formatReviewComments(comments: PRReviewComment[]): string {
+    if (comments.length === 0) {
+      return '(Nenhum comentário de review encontrado)';
+    }
+
+    const inline = comments.filter(c => c.type === 'inline');
+    const general = comments.filter(c => c.type === 'general');
+    const sections: string[] = [];
+
+    if (inline.length > 0) {
+      sections.push('### Comentários inline (por arquivo)');
+      for (const c of inline) {
+        const location = c.line ? `\`${c.path}\` linha ${c.line}` : `\`${c.path}\``;
+        sections.push(`**${location}** — *${c.author}*\n> ${c.body.replace(/\n/g, '\n> ')}`);
+      }
+    }
+
+    if (general.length > 0) {
+      sections.push('### Comentários gerais');
+      for (const c of general) {
+        sections.push(`**${c.author}:**\n> ${c.body.replace(/\n/g, '\n> ')}`);
+      }
+    }
+
+    return sections.join('\n\n');
   }
 
   private buildSystemPrompt(): string {

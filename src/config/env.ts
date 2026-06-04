@@ -55,6 +55,7 @@ export const env = {
   LABEL_WAITING: 'waiting-for-human',
   LABEL_WAITING_AGENT: 'waiting-for-agent',
   LABEL_DONE: 'agent-done',
+  LABEL_REVIEW: 'agent-review',
 } as const;
 
 if (env.POLL_INTERVAL_MINUTES < 1) {

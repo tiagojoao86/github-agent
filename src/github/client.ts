@@ -4,6 +4,7 @@ import { logger } from '../utils/logger.js';
 import { GitHubIssue } from "./model/gihub-issue.js";
 import { GitHubComment } from "./model/github-comment.js";
 import { PullRequestResult } from "./model/pull-request-result.js";
+import { PRReviewComment } from "./model/pr-review-comment.js";
 
 export class GitHubClient {
   private octokit: Octokit;
@@ -109,7 +110,8 @@ export class GitHubClient {
       { name: env.LABEL_PROCESSING, color: 'e4e669', description: 'Sendo processdado pelo agente' },
       { name: env.LABEL_WAITING, color: 'd93f0b', description: 'Aguardando resposta humana' },
       { name: env.LABEL_WAITING_AGENT, color: 'f29513', description: 'Humano respondeu — aguardando agente retomar' },
-      { name: env.LABEL_DONE, color: '0e8a16', description: 'PR ceriado pelo agente' },
+      { name: env.LABEL_DONE, color: '0e8a16', description: 'PR criado pelo agente' },
+      { name: env.LABEL_REVIEW, color: '7057ff', description: 'Revisar comentários do PR' },
     ];
 
     for (const labelDef of labelsToCreate) {
@@ -253,6 +255,86 @@ export class GitHubClient {
     return { number: pr.number, url: pr.html_url };
   }
 
+  async getPRReviewComments(prNumber: number): Promise<PRReviewComment[]> {
+    const comments: PRReviewComment[] = [];
+
+    // Comentários inline (em linhas específicas do diff)
+    const { data: inlineComments } = await this.octokit.pulls.listReviewComments({
+      owner: this.owner,
+      repo: this.repo,
+      pull_number: prNumber,
+      per_page: 100,
+    });
+
+    for (const c of inlineComments) {
+      if (c.body.trim()) {
+        comments.push({
+          id: c.id,
+          author: c.user?.login ?? 'unknown',
+          body: c.body,
+          type: 'inline',
+          path: c.path,
+          line: c.line ?? c.original_line ?? undefined,
+        });
+      }
+    }
+
+    // Reviews gerais (CHANGES_REQUESTED ou COMMENTED com corpo)
+    const { data: reviews } = await this.octokit.pulls.listReviews({
+      owner: this.owner,
+      repo: this.repo,
+      pull_number: prNumber,
+      per_page: 100,
+    });
+
+    for (const r of reviews) {
+      if (r.body?.trim() && (r.state === 'CHANGES_REQUESTED' || r.state === 'COMMENTED')) {
+        comments.push({
+          id: r.id,
+          author: r.user?.login ?? 'unknown',
+          body: r.body,
+          type: 'general',
+        });
+      }
+    }
+
+    return comments;
+  }
+
+  async getUnresolvedThreadIds(prNumber: number): Promise<string[]> {
+    const result = await this.octokit.graphql<{
+      repository: {
+        pullRequest: {
+          reviewThreads: { nodes: { id: string; isResolved: boolean }[] };
+        };
+      };
+    }>(`
+      query($owner: String!, $repo: String!, $prNumber: Int!) {
+        repository(owner: $owner, name: $repo) {
+          pullRequest(number: $prNumber) {
+            reviewThreads(first: 100) {
+              nodes { id isResolved }
+            }
+          }
+        }
+      }
+    `, { owner: this.owner, repo: this.repo, prNumber });
+
+    return result.repository.pullRequest.reviewThreads.nodes
+      .filter(t => !t.isResolved)
+      .map(t => t.id);
+  }
+
+  async resolveReviewThread(threadId: string): Promise<void> {
+    await this.octokit.graphql(`
+      mutation($threadId: ID!) {
+        resolveReviewThread(input: { threadId: $threadId }) {
+          thread { id }
+        }
+      }
+    `, { threadId });
+  }
+
   async postSuccessComment(
     issueNumber: number,
     summary: string | null,
@@ -278,6 +360,33 @@ export class GitHubClient {
     });
 
     logger.info(`Comentário de conclusão postado na issue #${issueNumber}`);
+  }
+
+  async postReviewAppliedComment(
+    issueNumber: number,
+    summary: string | null,
+    prUrl: string,
+    filesChanged: string[]
+  ): Promise<void> {
+    const summarySection = summary ? `\n\n${summary}` : '';
+
+    const fileSection = filesChanged.length > 0
+      ? `\n\n**Arquivos alterados (${filesChanged.length}):**\n` +
+        filesChanged.map(f => `- \`${f}\``).join('\n')
+      : '';
+
+    const body =
+      `🔄 **Review aplicado**${summarySection}${fileSection}\n\n` +
+      `As correções solicitadas foram aplicadas. Por favor, revisite o PR: ${prUrl}`;
+
+    await this.octokit.issues.createComment({
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: issueNumber,
+      body,
+    });
+
+    logger.info(`Comentário de review aplicado postado na issue #${issueNumber}`);
   }
 
 }

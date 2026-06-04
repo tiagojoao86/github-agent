@@ -84,6 +84,7 @@ export class Scheduler {
     try {
       await this.processReadyIssues();
       await this.resumeWaitingForAgentIssues();
+      await this.processAgentReviewIssues();
     } catch (error) {
       logger.error('Erro inesperado no tick', { error });
     } finally {
@@ -210,6 +211,77 @@ export class Scheduler {
       logger.error(`Erro ao retomar issue #${issue.number}`, { message, stack });
       await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING_AGENT)
         .catch(() => { });
+    }
+  }
+
+  private async processAgentReviewIssues(): Promise<void> {
+    const issues = await this.github.getIssuesWithLabel(env.LABEL_REVIEW, 50);
+
+    if (issues.length === 0) {
+      logger.debug('Nenhuma issue com agent-review encontrada');
+      return;
+    }
+
+    logger.info(`Aplicando review em ${issues.length} issue(s) com agent-review`);
+
+    const limit = pLimit(1);
+    await Promise.allSettled(
+      issues.map((issue) => limit(() => this.reviewIssueWithIsolation(issue)))
+    );
+  }
+
+  private async reviewIssueWithIsolation(issue: GitHubIssue): Promise<void> {
+    try {
+      await this.github.transitionLabel(issue.number, env.LABEL_REVIEW, env.LABEL_PROCESSING);
+
+      // Encontra o PR associado à branch desta issue
+      const branchName = this.github.getBranchName(issue.number);
+      const pr = await this.github.findPRForBranch(branchName).catch(() => null);
+
+      if (!pr) {
+        logger.warn(`Issue #${issue.number} tem agent-review mas não tem PR aberto — devolvendo label`);
+        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_REVIEW);
+        return;
+      }
+
+      // Busca os comentários de review do PR
+      const reviewComments = await this.github.getPRReviewComments(pr.number);
+
+      if (reviewComments.length === 0) {
+        logger.warn(`PR #${pr.number} não tem comentários de review — removendo label agent-review`);
+        await this.github.removeLabel(issue.number, env.LABEL_PROCESSING);
+        await this.github.removeLabel(issue.number, env.LABEL_REVIEW).catch(() => {});
+        return;
+      }
+
+      const result = await this.agentRunner.reviewIssue(issue, pr.number, reviewComments);
+
+      if (result.type === 'success') {
+        await this.github.removeLabel(issue.number, env.LABEL_PROCESSING);
+        await this.github.addLabel(issue.number, env.LABEL_DONE).catch(() => {});
+        logger.info(`Issue #${issue.number} — review aplicado. PR: ${result.prUrl}`);
+
+        // Marca todas as threads do PR como resolvidas
+        const threadIds = await this.github.getUnresolvedThreadIds(pr.number).catch(() => []);
+        for (const threadId of threadIds) {
+          await this.github.resolveReviewThread(threadId).catch(() => {});
+        }
+        if (threadIds.length > 0) {
+          logger.info(`${threadIds.length} thread(s) do PR #${pr.number} marcadas como resolvidas`);
+        }
+      } else if (result.type === 'needs-clarification') {
+        await this.github.postComment(issue.number, result.question);
+        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
+      } else if (result.type === 'rate-limit') {
+        this.rateLimitState.recordHit(result.retryAfterMs);
+        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_REVIEW);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+      logger.error(`Erro ao aplicar review na issue #${issue.number}`, { message, stack });
+      await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_REVIEW)
+        .catch(() => {});
     }
   }
 }
