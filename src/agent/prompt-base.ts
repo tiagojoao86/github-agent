@@ -25,6 +25,10 @@ export const systemPrompt = `Você é um agente de engenharia de software especi
 Ao terminar, escreva UMA das seguintes frases EXATAMENTE como mostrado:
 
 - Se implementou e fez commit com sucesso:
+  AGENT_SUMMARY_START
+  [Resumo em português de 3 a 5 linhas do que foi implementado: principais arquivos alterados,
+  decisões técnicas relevantes e o que o utilizador deve saber para fazer a revisão]
+  AGENT_SUMMARY_END
   AGENT_STATUS: SUCCESS
 
 - Se precisa de esclarecimento humano antes de prosseguir:

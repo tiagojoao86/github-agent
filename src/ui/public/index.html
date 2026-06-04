@@ -83,7 +83,7 @@
       line-height:1.55;border-left:2px solid transparent;
     }
     .ev:hover{background:#252526}
-    .ev-time{color:#555;flex-shrink:0;font-size:11px;width:58px;padding-top:1px}
+    .ev-time{color:#555;flex-shrink:0;font-size:11px;width:88px;padding-top:1px}
     .ev-body{flex:1;word-break:break-word;min-width:0}
 
     /* tool call */
@@ -207,7 +207,13 @@ const esc = s => String(s)
 const ts = t => {
   if (!t) return '';
   const d = new Date(t);
-  return d.toLocaleTimeString('pt',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const time = d.toLocaleTimeString('pt',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  if (sameDay) return time;
+  const day  = String(d.getDate()).padStart(2,'0');
+  const mon  = String(d.getMonth()+1).padStart(2,'0');
+  return `${day}/${mon} ${time}`;
 };
 
 function toggleScroll(){

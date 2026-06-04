@@ -253,6 +253,33 @@ export class GitHubClient {
     return { number: pr.number, url: pr.html_url };
   }
 
+  async postSuccessComment(
+    issueNumber: number,
+    summary: string | null,
+    prUrl: string,
+    filesChanged: string[]
+  ): Promise<void> {
+    const summarySection = summary ? `\n\n${summary}` : '';
+
+    const fileSection = filesChanged.length > 0
+      ? `\n\n**Arquivos alterados (${filesChanged.length}):**\n` +
+        filesChanged.map(f => `- \`${f}\``).join('\n')
+      : '';
+
+    const body =
+      `✅ **Implementação concluída**${summarySection}${fileSection}\n\n` +
+      `**PR:** ${prUrl}`;
+
+    await this.octokit.issues.createComment({
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: issueNumber,
+      body,
+    });
+
+    logger.info(`Comentário de conclusão postado na issue #${issueNumber}`);
+  }
+
 }
 
 

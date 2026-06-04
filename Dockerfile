@@ -33,4 +33,8 @@ RUN git config --global user.email "agent@github-bot.local" && \
       '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f' && \
     git config --global safe.directory /workspace/repo
 
-CMD ["node", "dist/index.js"]
+USER root
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

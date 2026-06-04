@@ -176,9 +176,22 @@ export class AgentRunner {
         return { type: 'rate-limit' };
       }
 
-      log.info(
-        `Sessão concluída. Tokens: ${running.input} input + ${running.output} output`
-      );
+      log.info('Sessão concluída', {
+        tokens: {
+          input:       running.input,
+          output:      running.output,
+          cacheRead:   running.cacheRead,
+          cacheCreate: running.cacheCreate,
+          newTokens:   running.input + running.output,
+          grandTotal:  running.input + running.output + running.cacheRead + running.cacheCreate,
+        },
+        estimatedCostUSD: (
+          (running.input       * 3.00  / 1_000_000) +
+          (running.output      * 15.00 / 1_000_000) +
+          (running.cacheRead   * 0.30  / 1_000_000) +
+          (running.cacheCreate * 3.75  / 1_000_000)
+        ).toFixed(4),
+      });
 
       // Analisa o output do agente para determinar o resultado
       const result = await this.parseAgentResult(issue, branchName, fullAgentOutput, log, isResume);
@@ -229,10 +242,20 @@ export class AgentRunner {
       // Faz push da branch
       await git.push('origin', branchName);
 
+      // Ficheiros alterados entre a base e a branch
+      const diffOutput = await git
+        .diff([`origin/${env.BASE_BRANCH}...HEAD`, '--name-only'])
+        .catch(() => '');
+      const filesChanged = diffOutput.split('\n').map(f => f.trim()).filter(Boolean);
+
+      const summary = this.extractSummary(agentOutput);
+
       // Se já existe PR para esta branch, reutiliza em vez de criar novo
       const existingPr = await this.github.findPRForBranch(branchName).catch(() => null);
       if (existingPr) {
         log.info(`PR #${existingPr.number} já existe — reutilizando`);
+        await this.github.postSuccessComment(issue.number, summary, existingPr.url, filesChanged)
+          .catch(err => log.warn('Falha ao postar comentário de conclusão', { err }));
         return { type: 'success', prUrl: existingPr.url };
       }
 
@@ -240,8 +263,11 @@ export class AgentRunner {
         issue.number,
         branchName,
         `fix: ${issue.title} (resolve #${issue.number})`,
-        this.buildPrBody(issue, agentOutput)
+        this.buildPrBody(issue, agentOutput, filesChanged)
       );
+
+      await this.github.postSuccessComment(issue.number, summary, pr.url, filesChanged)
+        .catch(err => log.warn('Falha ao postar comentário de conclusão', { err }));
 
       return { type: 'success', prUrl: pr.url };
     }
@@ -313,18 +339,30 @@ export class AgentRunner {
     };
   }
 
-  private buildPrBody(issue: GitHubIssue, agentOutput: string): string {
+  private extractSummary(agentOutput: string): string | null {
+    const match = agentOutput.match(/AGENT_SUMMARY_START\s*([\s\S]*?)\s*AGENT_SUMMARY_END/);
+    return match?.[1]?.trim() ?? null;
+  }
+
+  private buildPrBody(issue: GitHubIssue, agentOutput: string, filesChanged: string[]): string {
+    const summary = this.extractSummary(agentOutput);
+
+    const summarySection = summary
+      ? `## O que foi feito\n\n${summary}\n`
+      : `## O que foi feito\n\nO agente analisou a issue e implementou as modificações necessárias.\n`;
+
+    const fileSection = filesChanged.length > 0
+      ? `## Arquivos alterados\n\n${filesChanged.map(f => `- \`${f}\``).join('\n')}\n`
+      : '';
+
     return `## Resolução Automática
 
 Este PR foi criado automaticamente pelo agente de issues.
 
 **Issue resolvida:** #${issue.number} — ${issue.title}
 
-## O que foi feito
-
-O agente analisou a issue e implementou as modificações necessárias.
-Por favor, revise as mudanças antes de fazer merge.
-
+${summarySection}
+${fileSection}
 ## Checklist
 
 - [ ] Revisei as mudanças no diff
@@ -336,7 +374,7 @@ Por favor, revise as mudanças antes de fazer merge.
 Se a implementação não estiver correcta:
 1. Comente na **issue #${issue.number}** explicando o que está errado
 2. Remova o label \`agent-done\` da issue
-3. Adicione o label \`waiting-for-human\`
+3. Adicione o label \`waiting-for-agent\`
 
 O agente retomará com o contexto do seu feedback e actualizará este PR.
 
