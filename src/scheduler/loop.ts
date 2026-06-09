@@ -7,6 +7,7 @@ import { RagEngine } from '../rag/retriever.js';
 import pLimit from 'p-limit';
 import { GitHubIssue } from '../github/model/gihub-issue.js';
 import { RateLimitState } from '../agent/rate-limit-state.js';
+import { parsePlanMetadata, PlanFile } from '../github/model/plan-metadata.js';
 
 // Tempo máximo que um tick pode durar: AGENT_TIMEOUT + 3 min de folga para operações GitHub
 const MAX_TICK_DURATION_MS = (parseInt(process.env.AGENT_TIMEOUT_MS ?? '300000', 10)) + 3 * 60 * 1000;
@@ -82,6 +83,10 @@ export class Scheduler {
     eventBus.publish({ type: 'tick_start', timestamp: new Date().toISOString() });
 
     try {
+      await this.processAgentPlanIssues();
+      await this.processApprovedPlans();
+      await this.checkQueuedIssues();
+      await this.checkPlanCompletion();
       await this.processReadyIssues();
       await this.resumeWaitingForAgentIssues();
       await this.processAgentReviewIssues();
@@ -212,6 +217,250 @@ export class Scheduler {
       await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING_AGENT)
         .catch(() => { });
     }
+  }
+
+  private async processAgentPlanIssues(): Promise<void> {
+    const issues = await this.github.getIssuesWithLabel(env.LABEL_PLAN);
+    if (issues.length === 0) {
+      logger.debug('Nenhuma issue com agent-plan encontrada');
+      return;
+    }
+    logger.info(`Criando plano para ${issues.length} issue(s) com agent-plan`);
+    const limit = pLimit(1);
+    await Promise.allSettled(issues.map(issue => limit(() => this.createPlanWithIsolation(issue))));
+  }
+
+  private async createPlanWithIsolation(issue: GitHubIssue): Promise<void> {
+    try {
+      await this.github.transitionLabel(issue.number, env.LABEL_PLAN, env.LABEL_PROCESSING);
+      const result = await this.agentRunner.createPlan(issue);
+
+      if (result.type === 'plan-ready') {
+        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_PLAN_REVIEW);
+        const planBranch = `agent/plan-${issue.number}`;
+        const planMd = await this.github.readFileFromBranch(planBranch, '.agent-plan.md');
+        const body =
+          `📋 **Plano gerado para revisão**\n\n` +
+          (planMd ? planMd : '(ver `.agent-plan.md` na branch `' + planBranch + '`)') +
+          `\n\n---\nRevisado o plano:\n- Se estiver correto: adicione o label \`agent-plan-approved\`\n` +
+          `- Se quiser mudanças: comente o que alterar e recoloque o label \`agent-plan\``;
+        await this.github.postComment(issue.number, body);
+        logger.info(`Plano #${issue.number} pronto para revisão`);
+      } else if (result.type === 'needs-clarification') {
+        await this.github.postComment(issue.number, result.question);
+        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
+      } else if (result.type === 'rate-limit') {
+        this.rateLimitState.recordHit(result.retryAfterMs);
+        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_PLAN);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`Erro ao criar plano para issue #${issue.number}`, { message });
+      await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_PLAN).catch(() => {});
+    }
+  }
+
+  private async processApprovedPlans(): Promise<void> {
+    const issues = await this.github.getIssuesWithLabel(env.LABEL_PLAN_APPROVED);
+    if (issues.length === 0) return;
+    logger.info(`Ativando ${issues.length} plano(s) aprovado(s)`);
+    const limit = pLimit(1);
+    await Promise.allSettled(issues.map(issue => limit(() => this.activatePlanWithIsolation(issue))));
+  }
+
+  private async activatePlanWithIsolation(planIssue: GitHubIssue): Promise<void> {
+    try {
+      await this.github.transitionLabel(planIssue.number, env.LABEL_PLAN_APPROVED, env.LABEL_PROCESSING);
+
+      const planBranch = `agent/plan-${planIssue.number}`;
+      const planJson = await this.github.readFileFromBranch(planBranch, '.agent-plan.json');
+      if (!planJson) {
+        throw new Error(`.agent-plan.json não encontrado na branch ${planBranch}`);
+      }
+
+      const plan = JSON.parse(planJson) as PlanFile;
+      const stepToIssue = new Map<number, number>();
+
+      // Cria issues filhas em ordem, resolvendo dependências pelo mapa step→issueNumber
+      for (const step of plan.steps) {
+        const resolvedDeps = step.dependsOn
+          .map(s => stepToIssue.get(s))
+          .filter((n): n is number => n !== undefined);
+
+        const metadata = JSON.stringify({
+          planIssue: planIssue.number,
+          planBranch,
+          dependsOn: resolvedDeps,
+          step: step.step,
+          totalSteps: plan.steps.length,
+        });
+
+        const testSection = step.testInstructions
+          ? `\n\n## Como testar\n\n${step.testInstructions}`
+          : '';
+        const body = `${step.body}${testSection}\n\n<!-- agent-plan-meta: ${metadata} -->`;
+        const issueNum = await this.github.createIssue(step.title, body, [env.LABEL_QUEUED]);
+        stepToIssue.set(step.step, issueNum);
+        logger.info(`Issue #${issueNum} criada: ${step.title}`);
+      }
+
+      // Ativa as issues sem dependências
+      for (const [stepNum, issueNum] of stepToIssue) {
+        const step = plan.steps.find(s => s.step === stepNum)!;
+        if (step.dependsOn.length === 0) {
+          await this.github.transitionLabel(issueNum, env.LABEL_QUEUED, env.LABEL_READY);
+          logger.info(`Issue #${issueNum} ativada (sem dependências)`);
+        }
+      }
+
+      await this.github.transitionLabel(planIssue.number, env.LABEL_PROCESSING, env.LABEL_PLAN_RUNNING);
+      await this.github.postComment(
+        planIssue.number,
+        `🚀 **Plano ativado!** ${plan.steps.length} tarefas criadas.\n\n` +
+        `As tarefas sem dependências já estão em \`agent-ready\`. ` +
+        `As demais serão ativadas automaticamente à medida que as dependências forem mergeadas.`
+      );
+      logger.info(`Plano #${planIssue.number} ativado com ${plan.steps.length} tarefas`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`Erro ao ativar plano #${planIssue.number}`, { message });
+      await this.github.transitionLabel(planIssue.number, env.LABEL_PROCESSING, env.LABEL_PLAN_APPROVED).catch(() => {});
+    }
+  }
+
+  private async checkQueuedIssues(): Promise<void> {
+    const queued = await this.github.getIssuesWithLabel(env.LABEL_QUEUED, 50);
+    if (queued.length === 0) return;
+
+    logger.info(`Verificando ${queued.length} issue(s) em fila`);
+
+    for (const issue of queued) {
+      const meta = parsePlanMetadata(issue.body ?? '');
+      if (!meta || meta.dependsOn.length === 0) continue;
+
+      try {
+        const results = await Promise.all(
+          meta.dependsOn.map(depNum =>
+            this.github.isPRMergedIntoBranch(depNum, meta.planBranch)
+          )
+        );
+
+        if (results.every(Boolean)) {
+          await this.github.transitionLabel(issue.number, env.LABEL_QUEUED, env.LABEL_READY);
+          logger.info(`Issue #${issue.number} desbloqueada — todas as dependências mergeadas`);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(`Erro ao verificar dependências da issue #${issue.number}`, { message });
+      }
+    }
+  }
+
+  private async checkPlanCompletion(): Promise<void> {
+    const running = await this.github.getIssuesWithLabel(env.LABEL_PLAN_RUNNING, 20);
+    if (running.length === 0) return;
+
+    for (const planIssue of running) {
+      try {
+        const children = await this.github.getChildIssues(planIssue.number);
+        if (children.length === 0) continue;
+
+        const allDone = children.every(c => c.labels.includes(env.LABEL_DONE));
+        if (!allDone) {
+          const done = children.filter(c => c.labels.includes(env.LABEL_DONE)).length;
+          logger.debug(`Plano #${planIssue.number}: ${done}/${children.length} etapas concluídas`);
+          continue;
+        }
+
+        const planBranch = `agent/plan-${planIssue.number}`;
+
+        // Gera o spec final e commita na plan branch antes de criar o PR
+        await this.commitPlanSpec(planIssue.number, planBranch, planIssue.title);
+
+        const existingPr = await this.github.findPRForBranch(planBranch).catch(() => null);
+        if (existingPr) {
+          logger.info(`PR final do plano #${planIssue.number} já existe (#${existingPr.number})`);
+          await this.github.transitionLabel(planIssue.number, env.LABEL_PLAN_RUNNING, env.LABEL_DONE);
+          continue;
+        }
+
+        const pr = await this.github.createPullRequest(
+          planIssue.number,
+          planBranch,
+          `feat: ${planIssue.title} (resolve #${planIssue.number})`,
+          this.buildPlanPrBody(planIssue, children),
+          env.BASE_BRANCH
+        );
+
+        await this.github.transitionLabel(planIssue.number, env.LABEL_PLAN_RUNNING, env.LABEL_DONE);
+        await this.github.postComment(
+          planIssue.number,
+          `✅ **Plano concluído!** Todas as ${children.length} etapas foram implementadas.\n\n` +
+          `**PR final:** ${pr.url}\n\n` +
+          `O spec completo foi salvo em \`docs/specs/\` e viajará junto com o merge.`
+        );
+        logger.info(`Plano #${planIssue.number} concluído. PR final: ${pr.url}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(`Erro ao verificar conclusão do plano #${planIssue.number}`, { message });
+      }
+    }
+  }
+
+  private async commitPlanSpec(planIssueNumber: number, planBranch: string, title: string): Promise<void> {
+    const [planMd, contextMd] = await Promise.all([
+      this.github.readFileFromBranch(planBranch, '.agent-plan.md'),
+      this.github.readFileFromBranch(planBranch, '.agent-context.md'),
+    ]);
+
+    if (!planMd && !contextMd) {
+      logger.warn(`Plano #${planIssueNumber}: sem .agent-plan.md nem .agent-context.md — spec não gerado`);
+      return;
+    }
+
+    const slug = title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .substring(0, 50);
+
+    const sections: string[] = [
+      `# Spec: ${title}\n\n_Issue de plano: #${planIssueNumber}_`,
+    ];
+    if (planMd) sections.push(`## Plano original\n\n${planMd}`);
+    if (contextMd) sections.push(`## Histórico de implementação\n\n${contextMd}`);
+
+    const specPath = `docs/specs/plan-${planIssueNumber}-${slug}.md`;
+    await this.github.commitFileToBranch(
+      planBranch,
+      specPath,
+      sections.join('\n\n'),
+      `docs: spec da feature "${title}" (#${planIssueNumber})`
+    );
+    logger.info(`Spec salvo em ${specPath} na branch ${planBranch}`);
+  }
+
+  private buildPlanPrBody(planIssue: GitHubIssue, children: GitHubIssue[]): string {
+    const childList = children
+      .map(c => `- Closes #${c.number} — ${c.title}`)
+      .join('\n');
+
+    return `## Resolução Automática — Plano Multi-etapa
+
+Este PR consolida as implementações de todas as etapas do plano.
+
+Closes #${planIssue.number}
+
+## Etapas implementadas
+
+${childList}
+
+## Spec
+
+O spec completo deste plano foi salvo em \`docs/specs/\` neste PR e ficará disponível para consulta futura pelo RAG.
+
+---
+*Gerado automaticamente pelo GitHub Agent*`;
   }
 
   private async processAgentReviewIssues(): Promise<void> {

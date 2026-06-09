@@ -8,14 +8,15 @@ import { PromptBuilder } from './prompt-builder.js';
 import { isRateLimitError, parseRetryAfter } from './rate-limit.js';
 import { GitHubIssue } from '../github/model/gihub-issue.js';
 import { PRReviewComment } from '../github/model/pr-review-comment.js';
+import { parsePlanMetadata } from '../github/model/plan-metadata.js';
 import { simpleGit, SimpleGit } from 'simple-git';
 import { eventBus, TokenUsage } from '../ui/event-bus.js';
 
-// Os três possíveis resultados de uma sessão do agente
 export type AgentResult =
   | { type: 'success'; prUrl: string }
   | { type: 'needs-clarification'; question: string }
-  | { type: 'rate-limit'; retryAfterMs?: number };
+  | { type: 'rate-limit'; retryAfterMs?: number }
+  | { type: 'plan-ready' };
 
 export class AgentRunner {
   private github: GitHubClient;
@@ -31,8 +32,12 @@ export class AgentRunner {
   async processIssue(issue: GitHubIssue): Promise<AgentResult> {
     const log = createContextLogger({ issueNumber: issue.number, phase: 'process' });
 
-    // 1. Cria a branch no GitHub
-    const branchName = await this.github.createBranch(issue.number);
+    // Detecta se é issue filha de um plano e ajusta o comportamento
+    const planMeta = parsePlanMetadata(issue.body ?? '');
+    const baseBranch = planMeta?.planBranch ?? env.BASE_BRANCH;
+
+    // 1. Cria a branch no GitHub (a partir da plan branch se for filha de plano)
+    const branchName = await this.github.createBranch(issue.number, baseBranch);
     log.info(`Branch criada: ${branchName}`);
 
     // 2. Configura o git local para usar a branch
@@ -46,21 +51,58 @@ export class AgentRunner {
     const ragContext = await this.ragEngine.retrieveContext(query_text);
     log.info(`RAG: ${ragContext.chunks.length} chunks recuperados`);
 
-    // 4. Monta o prompt
+    // 4. Monta o prompt (com contexto do plano se aplicável)
     const prompt = await this.promptBuilder.buildForNewIssue(
       issue,
       ragContext,
       env.REPO_LOCAL_PATH,
-      branchName
+      branchName,
+      planMeta
     );
 
     // 5. Roda o agente
-    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, false);
+    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, false, false, baseBranch);
+  }
+
+  async createPlan(issue: GitHubIssue): Promise<AgentResult> {
+    const log = createContextLogger({ issueNumber: issue.number, phase: 'plan-creation' });
+
+    const planBranch = await this.github.createPlanBranch(issue.number);
+    log.info(`Plan branch: ${planBranch}`);
+
+    const git: SimpleGit = simpleGit(env.REPO_LOCAL_PATH);
+    await git.fetch('origin');
+    await git.checkout(planBranch);
+
+    // Verifica se já existe um plano (modo revisão)
+    const existingPlan = await this.github.readFileFromBranch(planBranch, '.agent-plan.json');
+    if (existingPlan) {
+      log.info('Plano existente detectado — modo revisão');
+    }
+
+    // Lê comentários para incluir no contexto (feedback do utilizador)
+    const allComments = await this.github.getComments(issue.number);
+    const conversationHistory = allComments
+      .map(c => `${c.isBot ? '🤖 Agente' : `👤 ${c.author}`}: ${c.body}`)
+      .join('\n\n---\n\n');
+
+    const prompt = await this.promptBuilder.buildForPlanCreation(
+      issue,
+      env.REPO_LOCAL_PATH,
+      planBranch,
+      existingPlan,
+      conversationHistory
+    );
+
+    log.info(existingPlan ? 'Revisando plano' : 'Criando plano');
+    return this.runAgentSession(issue, planBranch, prompt.systemPrompt, prompt.userPrompt, false, false, env.BASE_BRANCH, true);
   }
 
   async resumeIssue(issue: GitHubIssue, humanResponse: string): Promise<AgentResult> {
     const log = createContextLogger({ issueNumber: issue.number, phase: 'resume' });
 
+    const planMeta = parsePlanMetadata(issue.body ?? '');
+    const baseBranch = planMeta?.planBranch ?? env.BASE_BRANCH;
     const branchName = this.github.getBranchName(issue.number);
 
     const git = simpleGit(env.REPO_LOCAL_PATH);
@@ -75,11 +117,12 @@ export class AgentRunner {
       ragContext,
       env.REPO_LOCAL_PATH,
       branchName,
-      humanResponse
+      humanResponse,
+      planMeta
     );
 
     log.info('Retomando issue com contexto da resposta humana');
-    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, true, false);
+    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, true, false, baseBranch);
   }
 
   async reviewIssue(issue: GitHubIssue, prNumber: number, reviewComments: PRReviewComment[]): Promise<AgentResult> {
@@ -113,7 +156,9 @@ export class AgentRunner {
     systemPrompt: string,
     userPrompt: string,
     isResume = false,
-    isReview = false
+    isReview = false,
+    prBaseBranch = env.BASE_BRANCH,
+    isPlan = false
   ): Promise<AgentResult> {
     const log = createContextLogger({ issueNumber: issue.number, phase: 'agent-session' });
 
@@ -221,7 +266,7 @@ export class AgentRunner {
       });
 
       // Analisa o output do agente para determinar o resultado
-      const result = await this.parseAgentResult(issue, branchName, fullAgentOutput, log, isResume, isReview);
+      const result = await this.parseAgentResult(issue, branchName, fullAgentOutput, log, isResume, isReview, prBaseBranch, isPlan);
       eventBus.publish({ type: 'session_end', issueNumber: issue.number, result: result.type, totalTokens: { ...running }, timestamp: now() });
       return result;
     } catch (error) {
@@ -248,14 +293,23 @@ export class AgentRunner {
     agentOutput: string,
     log: ReturnType<typeof createContextLogger>,
     isResume = false,
-    isReview = false
+    isReview = false,
+    prBaseBranch = env.BASE_BRANCH,
+    isPlan = false
   ): Promise<AgentResult> {
+
+    // Plano pronto para revisão
+    if (isPlan && agentOutput.includes('AGENT_STATUS: PLAN_READY')) {
+      log.info('Plano pronto para revisão');
+      return { type: 'plan-ready' };
+    }
+
     // Procura pelos sinalizadores de status no output do agente
     if (agentOutput.includes('AGENT_STATUS: SUCCESS')) {
       log.info('Agente sinalizou sucesso — verificando branch e PR');
 
       const git = simpleGit(env.REPO_LOCAL_PATH);
-      const log_result = await git.log({ from: `origin/${env.BASE_BRANCH}`, to: branchName }).catch(() => null);
+      const log_result = await git.log({ from: `origin/${prBaseBranch}`, to: branchName }).catch(() => null);
 
       if (!log_result || log_result.total === 0) {
         log.warn('Agente sinalizou sucesso mas não há commits — tratando como clarification');
@@ -272,7 +326,7 @@ export class AgentRunner {
 
       // Ficheiros alterados entre a base e a branch
       const diffOutput = await git
-        .diff([`origin/${env.BASE_BRANCH}...HEAD`, '--name-only'])
+        .diff([`origin/${prBaseBranch}...HEAD`, '--name-only'])
         .catch(() => '');
       const filesChanged = diffOutput.split('\n').map(f => f.trim()).filter(Boolean);
 
@@ -301,7 +355,8 @@ export class AgentRunner {
         issue.number,
         branchName,
         `fix: ${issue.title} (resolve #${issue.number})`,
-        this.buildPrBody(issue, agentOutput, filesChanged)
+        this.buildPrBody(issue, agentOutput, filesChanged),
+        prBaseBranch
       );
 
       await this.github.postSuccessComment(issue.number, summary, pr.url, filesChanged)

@@ -4,7 +4,9 @@ import { env } from '../config/env.js';
 import { GitHubIssue } from '../github/model/gihub-issue.js';
 import { RetrievalResult } from '../rag/retriever.js';
 import { logger } from '../utils/logger.js';
-import { systemPrompt } from './prompt-base.js';
+import { systemPrompt, buildPlanSystemPrompt } from './prompt-base.js';
+import { execSync } from 'child_process';
+import { PlanMetadata } from '../github/model/plan-metadata.js';
 import { formatConversationForPrompt, buildConversationHistory } from './conversation.js';
 import type { GitHubComment } from '../github/model/github-comment.js';
 import type { PRReviewComment } from '../github/model/pr-review-comment.js';
@@ -15,6 +17,70 @@ export interface AgentPrompt {
 }
 
 export class PromptBuilder {
+
+  async buildForPlanCreation(
+    issue: GitHubIssue,
+    repoPath: string,
+    planBranch: string,
+    existingPlan: string | null,
+    conversationHistory: string
+  ): Promise<AgentPrompt> {
+    const isRevision = existingPlan !== null;
+
+    let userPrompt = `## ${isRevision ? 'Revisão do Plano' : 'Nova Solicitação de Plano'}
+
+**Issue #${issue.number}:** ${issue.title}
+**Branch do plano:** \`${planBranch}\`
+
+**Descrição original:**
+${issue.body ?? '(Sem descrição)'}
+`;
+
+    if (isRevision) {
+      userPrompt += `
+## Plano atual (para revisão)
+
+\`\`\`json
+${existingPlan}
+\`\`\`
+
+## Feedback e pedidos de mudança
+
+${conversationHistory}
+
+## Instruções
+
+Revise o plano levando em conta o feedback acima.
+Atualize os arquivos \`.agent-plan.json\` e \`.agent-plan.md\` na branch \`${planBranch}\`.
+Sinalize com AGENT_STATUS: PLAN_READY quando terminar.`;
+    } else {
+      userPrompt += `
+## Instruções
+
+1. Analise o que precisa ser implementado
+2. Quebre em etapas coesas — cada etapa = uma mudança completa e testável isoladamente
+3. Identifique as dependências entre etapas
+4. Escreva \`.agent-plan.json\` e \`.agent-plan.md\` na branch \`${planBranch}\`
+5. Sinalize com AGENT_STATUS: PLAN_READY`;
+    }
+
+    return {
+      systemPrompt: buildPlanSystemPrompt(planBranch),
+      userPrompt,
+    };
+  }
+
+  private async getPlanContext(repoPath: string, planBranch: string): Promise<string | null> {
+    try {
+      const content = execSync(
+        `git -C "${repoPath}" show "origin/${planBranch}:.agent-context.md"`,
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+      );
+      return `=== Contexto do Plano (.agent-context.md da branch ${planBranch}) ===\n${content}`;
+    } catch {
+      return null;
+    }
+  }
 
   async buildForResumedIssueWithHistory(
     issue: GitHubIssue,
@@ -60,21 +126,24 @@ export class PromptBuilder {
     issue: GitHubIssue,
     ragContext: RetrievalResult,
     repoPath: string,
-    branchName: string
+    branchName: string,
+    planMeta?: PlanMetadata | null
   ): Promise<AgentPrompt> {
     const projectContext = await this.getProjectContext(repoPath);
     const ragSection = this.formatRagContext(ragContext);
+    const planContext = planMeta ? await this.getPlanContext(repoPath, planMeta.planBranch) : null;
 
-    const systemPrompt = this.buildSystemPrompt();
     const userPrompt = this.buildUserPrompt({
       projectContext,
       ragSection,
       issue,
       branchName,
       previousConversation: null,
+      planContext,
+      planMeta,
     });
 
-    return { systemPrompt, userPrompt };
+    return { systemPrompt: this.buildSystemPrompt(), userPrompt };
   }
 
   async buildForResumedIssue(
@@ -82,21 +151,24 @@ export class PromptBuilder {
     ragContext: RetrievalResult,
     repoPath: string,
     branchName: string,
-    humanResponse: string
+    humanResponse: string,
+    planMeta?: PlanMetadata | null
   ): Promise<AgentPrompt> {
     const projectContext = await this.getProjectContext(repoPath);
     const ragSection = this.formatRagContext(ragContext);
+    const planContext = planMeta ? await this.getPlanContext(repoPath, planMeta.planBranch) : null;
 
-    const systemPrompt = this.buildSystemPrompt();
     const userPrompt = this.buildUserPrompt({
       projectContext,
       ragSection,
       issue,
       branchName,
       previousConversation: humanResponse,
+      planContext,
+      planMeta,
     });
 
-    return { systemPrompt, userPrompt };
+    return { systemPrompt: this.buildSystemPrompt(), userPrompt };
   }
 
   async buildForPRReview(
@@ -190,14 +262,31 @@ ${reviewSection}`;
     issue: GitHubIssue;
     branchName: string;
     previousConversation: string | null;
+    planContext?: string | null;
+    planMeta?: PlanMetadata | null;
   }): string {
-    const { projectContext, ragSection, issue, branchName, previousConversation } = params;
+    const { projectContext, ragSection, issue, branchName, previousConversation, planContext, planMeta } = params;
 
     let prompt = `## Contexto do Projeto
 
 ${projectContext}
+`;
 
-## Arquivos Relevantes (recuperados por busca semântica)
+    if (planContext) {
+      prompt += `
+## Contexto do Plano de Execução
+
+Esta issue faz parte de um plano multi-etapa (issue pai #${planMeta!.planIssue}).
+Etapa ${planMeta!.step} de ${planMeta!.totalSteps}.
+
+${planContext}
+
+**Importante:** implemente APENAS o que está descrito nesta etapa. Não antecipe o trabalho das próximas etapas.
+
+`;
+    }
+
+    prompt += `## Arquivos Relevantes (recuperados por busca semântica)
 
 Os seguintes arquivos foram identificados como mais relevantes para esta issue.
 Use-os como ponto de partida, mas leia outros arquivos se necessário.
@@ -230,8 +319,30 @@ ${issue.body ?? '(Sem descrição)'}
    git add -A
    git commit -m "fix: resolve issue #${issue.number} - ${issue.title}"
    \`\`\`
+`;
 
+    if (planMeta) {
+      prompt += `
+5. Atualize o .agent-context.md na branch \`${planMeta.planBranch}\` com o que foi implementado:
+   \`\`\`bash
+   git fetch origin
+   git show origin/${planMeta.planBranch}:.agent-context.md > /tmp/ctx.md
+   # Adicione no final do ficheiro uma secção "### ✅ Etapa ${planMeta.step} — ${issue.title}"
+   # com o que foi implementado
+   git stash
+   git checkout ${planMeta.planBranch}
+   # edite .agent-context.md
+   git add .agent-context.md && git commit -m "chore: atualiza contexto etapa ${planMeta.step}"
+   git push origin ${planMeta.planBranch}
+   git checkout ${branchName}
+   git stash pop 2>/dev/null || true
+   \`\`\`
+
+6. Sinalize o resultado com AGENT_STATUS conforme as instruções do sistema`;
+    } else {
+      prompt += `
 5. Sinalize o resultado com AGENT_STATUS conforme as instruções do sistema`;
+    }
 
     if (previousConversation) {
       prompt += `

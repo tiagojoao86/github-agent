@@ -111,7 +111,12 @@ export class GitHubClient {
       { name: env.LABEL_WAITING, color: 'd93f0b', description: 'Aguardando resposta humana' },
       { name: env.LABEL_WAITING_AGENT, color: 'f29513', description: 'Humano respondeu — aguardando agente retomar' },
       { name: env.LABEL_DONE, color: '0e8a16', description: 'PR criado pelo agente' },
-      { name: env.LABEL_REVIEW, color: '7057ff', description: 'Revisar comentários do PR' },
+      { name: env.LABEL_REVIEW,        color: '7057ff', description: 'Revisar comentários do PR' },
+      { name: env.LABEL_PLAN,          color: '0057e7', description: 'Criar plano de execução' },
+      { name: env.LABEL_PLAN_REVIEW,   color: '5319e7', description: 'Plano aguardando revisão' },
+      { name: env.LABEL_PLAN_APPROVED, color: '0e8a16', description: 'Plano aprovado — criar tarefas' },
+      { name: env.LABEL_PLAN_RUNNING,  color: 'e6ac00', description: 'Plano em execução' },
+      { name: env.LABEL_QUEUED,        color: 'cccccc', description: 'Aguardando dependências' },
     ];
 
     for (const labelDef of labelsToCreate) {
@@ -129,6 +134,16 @@ export class GitHubClient {
         throw error;
       }
     }
+  }
+
+  async closeIssue(issueNumber: number): Promise<void> {
+    await this.octokit.issues.update({
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: issueNumber,
+      state: 'closed',
+    });
+    logger.debug(`Issue #${issueNumber} fechada`);
   }
 
   async postComment(issueNumber: number, body: string): Promise<number> {
@@ -186,8 +201,36 @@ export class GitHubClient {
     return `agent/issue-${issueNumber}`;
   }
 
-  async createBranch(issueNumber: number): Promise<string> {
+  async createBranch(issueNumber: number, baseBranch = env.BASE_BRANCH): Promise<string> {
     const branchName = this.getBranchName(issueNumber);
+
+    const { data: ref } = await this.octokit.git.getRef({
+      owner: this.owner,
+      repo: this.repo,
+      ref: `heads/${baseBranch}`,
+    });
+
+    try {
+      await this.octokit.git.createRef({
+        owner: this.owner,
+        repo: this.repo,
+        ref: `refs/heads/${branchName}`,
+        sha: ref.object.sha,
+      });
+      logger.info(`Branch criada: ${branchName} a partir de ${baseBranch}`);
+    } catch (error: unknown) {
+      if (isOctokitError(error) && error.status === 422) {
+        logger.warn(`Branch ${branchName} já existe — reutilizando`);
+      } else {
+        throw error;
+      }
+    }
+
+    return branchName;
+  }
+
+  async createPlanBranch(planIssueNumber: number): Promise<string> {
+    const branchName = `agent/plan-${planIssueNumber}`;
 
     const { data: ref } = await this.octokit.git.getRef({
       owner: this.owner,
@@ -202,16 +245,99 @@ export class GitHubClient {
         ref: `refs/heads/${branchName}`,
         sha: ref.object.sha,
       });
-      logger.info(`Branch criada: ${branchName} a partir de ${env.BASE_BRANCH}`);
+      logger.info(`Plan branch criada: ${branchName} a partir de ${env.BASE_BRANCH}`);
     } catch (error: unknown) {
       if (isOctokitError(error) && error.status === 422) {
-        logger.warn(`Branch ${branchName} já existe — reutilizando`);
+        logger.warn(`Plan branch ${branchName} já existe — reutilizando`);
       } else {
         throw error;
       }
     }
 
     return branchName;
+  }
+
+  async readFileFromBranch(branch: string, filePath: string): Promise<string | null> {
+    try {
+      const { data } = await this.octokit.repos.getContent({
+        owner: this.owner,
+        repo: this.repo,
+        path: filePath,
+        ref: branch,
+      });
+      if (Array.isArray(data) || data.type !== 'file') return null;
+      return Buffer.from(data.content, 'base64').toString('utf-8');
+    } catch {
+      return null;
+    }
+  }
+
+  async createIssue(title: string, body: string, labels: string[]): Promise<number> {
+    const { data } = await this.octokit.issues.create({
+      owner: this.owner,
+      repo: this.repo,
+      title,
+      body,
+      labels,
+    });
+    logger.info(`Issue criada: #${data.number} — ${title}`);
+    return data.number;
+  }
+
+  async getChildIssues(planIssueNumber: number): Promise<GitHubIssue[]> {
+    const { data } = await this.octokit.search.issuesAndPullRequests({
+      q: `repo:${this.owner}/${this.repo} "planIssue":${planIssueNumber} is:issue`,
+      per_page: 50,
+    });
+    return data.items.map(issue => ({
+      number: issue.number,
+      title: issue.title,
+      body: issue.body ?? null,
+      labels: issue.labels.map(l => (typeof l === 'string' ? l : l.name ?? '')),
+      htmlUrl: issue.html_url,
+      createdAt: issue.created_at,
+    }));
+  }
+
+  async isPRMergedIntoBranch(issueNumber: number, planBranch: string): Promise<boolean> {
+    const branchName = this.getBranchName(issueNumber);
+    const { data } = await this.octokit.pulls.list({
+      owner: this.owner,
+      repo: this.repo,
+      head: `${this.owner}:${branchName}`,
+      base: planBranch,
+      state: 'closed',
+      per_page: 1,
+    });
+    return data.length > 0 && data[0].merged_at !== null;
+  }
+
+  async commitFileToBranch(branch: string, filePath: string, content: string, message: string): Promise<void> {
+    let sha: string | undefined;
+    try {
+      const { data } = await this.octokit.repos.getContent({
+        owner: this.owner,
+        repo: this.repo,
+        path: filePath,
+        ref: branch,
+      });
+      if (!Array.isArray(data) && data.type === 'file') {
+        sha = data.sha;
+      }
+    } catch {
+      // arquivo ainda não existe
+    }
+
+    await this.octokit.repos.createOrUpdateFileContents({
+      owner: this.owner,
+      repo: this.repo,
+      path: filePath,
+      message,
+      content: Buffer.from(content).toString('base64'),
+      branch,
+      sha,
+    });
+    logger.info(`Arquivo ${filePath} commitado na branch ${branch}`);
   }
 
   async findPRForBranch(branchName: string): Promise<{ number: number; url: string; state: string } | null> {
@@ -240,7 +366,8 @@ export class GitHubClient {
     issueNumber: number,
     branchName: string,
     title: string,
-    body: string
+    body: string,
+    base = env.BASE_BRANCH
   ): Promise<PullRequestResult> {
     const { data: pr } = await this.octokit.pulls.create({
       owner: this.owner,
@@ -248,7 +375,7 @@ export class GitHubClient {
       title,
       body,
       head: branchName,
-      base: env.BASE_BRANCH,
+      base,
     });
 
     logger.info(`PR #${pr.number} criado: ${pr.html_url}`);
