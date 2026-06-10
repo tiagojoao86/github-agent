@@ -9,6 +9,13 @@ import { GitHubIssue } from '../github/model/gihub-issue.js';
 import { RateLimitState } from '../agent/rate-limit-state.js';
 import { parsePlanMetadata, PlanFile } from '../github/model/plan-metadata.js';
 
+export type ProjectContext = {
+  label: string;
+  github: GitHubClient;
+  ragEngine: RagEngine;
+  agentRunner: AgentRunner;
+};
+
 // Tempo máximo que um tick pode durar: AGENT_TIMEOUT + 3 min de folga para operações GitHub
 const MAX_TICK_DURATION_MS = (parseInt(process.env.AGENT_TIMEOUT_MS ?? '300000', 10)) + 3 * 60 * 1000;
 
@@ -16,17 +23,11 @@ export class Scheduler {
   private isRunning = false;
   private tickStartedAt: number | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private github: GitHubClient;
-  private ragEngine: RagEngine;
-  private agentRunner: AgentRunner;
+  private projects: ProjectContext[];
   private rateLimitState: RateLimitState;
 
-  constructor(github: GitHubClient,
-    ragEngine: RagEngine,
-    agentRunner: AgentRunner) {
-    this.github = github;
-    this.ragEngine = ragEngine;
-    this.agentRunner = agentRunner;
+  constructor(projects: ProjectContext[]) {
+    this.projects = projects;
     this.rateLimitState = new RateLimitState();
   }
 
@@ -83,13 +84,15 @@ export class Scheduler {
     eventBus.publish({ type: 'tick_start', timestamp: new Date().toISOString() });
 
     try {
-      await this.processAgentPlanIssues();
-      await this.processApprovedPlans();
-      await this.checkQueuedIssues();
-      await this.checkPlanCompletion();
-      await this.processReadyIssues();
-      await this.resumeWaitingForAgentIssues();
-      await this.processAgentReviewIssues();
+      for (const project of this.projects) {
+        if (this.rateLimitState.isInCooldown()) {
+          const remainingSec = Math.ceil(this.rateLimitState.getCooldownRemaingMs() / 1000);
+          logger.info(`[${project.label}] Pulando: rate limit ativo (${remainingSec}s restantes)`);
+          break;
+        }
+        logger.info(`=== Projeto: ${project.label} ===`);
+        await this.tickForProject(project);
+      }
     } catch (error) {
       logger.error('Erro inesperado no tick', { error });
     } finally {
@@ -101,179 +104,174 @@ export class Scheduler {
     }
   }
 
+  private async tickForProject(project: ProjectContext): Promise<void> {
+    await this.processAgentPlanIssues(project);
+    await this.processApprovedPlans(project);
+    await this.checkQueuedIssues(project);
+    await this.checkPlanCompletion(project);
+    await this.processReadyIssues(project);
+    await this.resumeWaitingForAgentIssues(project);
+    await this.processAgentReviewIssues(project);
+  }
+
   // Processa issues marcadas como 'agent-ready'
-  private async processReadyIssues(): Promise<void> {
-    const issues = await this.github.getIssuesWithLabel(env.LABEL_READY);
+  private async processReadyIssues(project: ProjectContext): Promise<void> {
+    const { github, label } = project;
+    const issues = await github.getIssuesWithLabel(env.LABEL_READY);
 
     if (issues.length === 0) {
-      logger.info('Nenhuma issue com agent-ready encontrada');
+      logger.debug(`[${label}] Nenhuma issue com agent-ready encontrada`);
       return;
     }
 
-    logger.info(`Processando ${issues.length} issue(s) com agent-ready`);
+    logger.info(`[${label}] Processando ${issues.length} issue(s) com agent-ready`);
 
-    // Limita paralelismo — comece com 1 para facilitar debug
     const limit = pLimit(1);
-
     await Promise.allSettled(
-      issues.map((issue) =>
-        limit(() => this.processIssueWithIsolation(issue))
-      )
+      issues.map((issue) => limit(() => this.processIssueWithIsolation(project, issue)))
     );
   }
 
-  // Retoma issues marcadas manualmente com 'waiting-for-agent' após resposta humana.
-  // O humano troca o label de 'waiting-for-human' para 'waiting-for-agent' depois de responder,
-  // tornando o handoff explícito e eliminando a detecção automática frágil.
-  private async resumeWaitingForAgentIssues(): Promise<void> {
-    const issues = await this.github.getIssuesWithLabel(env.LABEL_WAITING_AGENT, 50);
+  private async resumeWaitingForAgentIssues(project: ProjectContext): Promise<void> {
+    const { github, label } = project;
+    const issues = await github.getIssuesWithLabel(env.LABEL_WAITING_AGENT, 50);
 
     if (issues.length === 0) {
-      logger.info('Nenhuma issue com waiting-for-agent encontrada');
+      logger.debug(`[${label}] Nenhuma issue com waiting-for-agent encontrada`);
       return;
     }
 
-    logger.info(`Retomando ${issues.length} issue(s) com waiting-for-agent`);
+    logger.info(`[${label}] Retomando ${issues.length} issue(s) com waiting-for-agent`);
 
     const limit = pLimit(1);
     await Promise.allSettled(
-      issues.map((issue) =>
-        limit(() => this.resumeIssueWithIsolation(issue))
-      )
+      issues.map((issue) => limit(() => this.resumeIssueWithIsolation(project, issue)))
     );
   }
 
-  // Isolamento de falha por issue — erros em uma issue não afetam as outras
-  private async processIssueWithIsolation(issue: GitHubIssue): Promise<void> {
-    const issueLogger = {
-      info: (msg: string) => logger.info(msg, { issueNumber: issue.number }),
-      error: (msg: string, meta?: object) =>
-        logger.error(msg, { issueNumber: issue.number, ...meta }),
-    };
+  private async processIssueWithIsolation(project: ProjectContext, issue: GitHubIssue): Promise<void> {
+    const { github, agentRunner, label } = project;
+    const ctx = { issueNumber: issue.number, project: label };
 
     try {
-      issueLogger.info(`Iniciando processamento: "${issue.title}"`);
-      await this.github.transitionLabel(issue.number, env.LABEL_READY, env.LABEL_PROCESSING);
+      logger.info(`[${label}] Iniciando: #${issue.number} "${issue.title}"`);
+      await github.transitionLabel(issue.number, env.LABEL_READY, env.LABEL_PROCESSING);
 
-      const result = await this.agentRunner.processIssue(issue);
+      const result = await agentRunner.processIssue(issue);
 
       if (result.type === 'success') {
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_DONE);
-        await this.github.removeLabel(issue.number, env.LABEL_WAITING).catch(() => {});
-        await this.github.removeLabel(issue.number, env.LABEL_WAITING_AGENT).catch(() => {});
-        issueLogger.info(`Issue resolvida. PR: ${result.prUrl}`);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_DONE);
+        await github.removeLabel(issue.number, env.LABEL_WAITING).catch(() => {});
+        await github.removeLabel(issue.number, env.LABEL_WAITING_AGENT).catch(() => {});
+        logger.info(`[${label}] Issue #${issue.number} resolvida. PR: ${result.prUrl}`);
       } else if (result.type === 'needs-clarification') {
-        await this.github.postComment(issue.number, result.question);
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
-        issueLogger.info('Agente fez pergunta — aguardando resposta humana');
+        await github.postComment(issue.number, result.question);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
+        logger.info(`[${label}] Issue #${issue.number}: agente fez pergunta — aguardando resposta`);
       } else if (result.type === 'rate-limit') {
         this.rateLimitState.recordHit(result.retryAfterMs);
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_READY);
-        issueLogger.info('Rate limit atingido — issue devolvida para fila');
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_READY);
+        logger.info(`[${label}] Issue #${issue.number}: rate limit — devolvida para fila`);
       }
     } catch (error) {
-      // Em caso de erro inesperado, devolve para agent-ready para nova tentativa
       const message = error instanceof Error ? error.message : String(error);
       const stack = error instanceof Error ? error.stack : undefined;
-      issueLogger.error('Erro inesperado no processamento', { message, stack });
-      try {
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_READY);
-      } catch {
-        // Best-effort
-      }
+      logger.error(`[${label}] Erro inesperado na issue #${issue.number}`, { message, stack, ...ctx });
+      await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_READY).catch(() => {});
     }
   }
 
-  private async resumeIssueWithIsolation(issue: GitHubIssue): Promise<void> {
+  private async resumeIssueWithIsolation(project: ProjectContext, issue: GitHubIssue): Promise<void> {
+    const { github, agentRunner, label } = project;
     try {
-      await this.github.transitionLabel(issue.number, env.LABEL_WAITING_AGENT, env.LABEL_PROCESSING);
+      await github.transitionLabel(issue.number, env.LABEL_WAITING_AGENT, env.LABEL_PROCESSING);
 
-      // Lê todos os comentários para dar ao agente o histórico completo da conversa
-      const allComments = await this.github.getComments(issue.number);
+      const allComments = await github.getComments(issue.number);
       const conversationContext = allComments
         .map((c) => `${c.isBot ? '🤖 Agente' : `👤 ${c.author}`}: ${c.body}`)
         .join('\n\n---\n\n');
 
-      const result = await this.agentRunner.resumeIssue(issue, conversationContext);
+      const result = await agentRunner.resumeIssue(issue, conversationContext);
 
       if (result.type === 'success') {
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_DONE);
-        // Remove labels residuais de iterações anteriores
-        await this.github.removeLabel(issue.number, env.LABEL_WAITING).catch(() => {});
-        await this.github.removeLabel(issue.number, env.LABEL_WAITING_AGENT).catch(() => {});
-        logger.info(`Issue #${issue.number} resolvida. PR: ${result.prUrl}`);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_DONE);
+        await github.removeLabel(issue.number, env.LABEL_WAITING).catch(() => {});
+        await github.removeLabel(issue.number, env.LABEL_WAITING_AGENT).catch(() => {});
+        logger.info(`[${label}] Issue #${issue.number} resolvida. PR: ${result.prUrl}`);
       } else if (result.type === 'needs-clarification') {
-        await this.github.postComment(issue.number, result.question);
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
+        await github.postComment(issue.number, result.question);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
       } else if (result.type === 'rate-limit') {
         this.rateLimitState.recordHit(result.retryAfterMs);
-        // Volta para waiting-for-agent: o humano não precisa fazer nada, o agente retomará sozinho
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING_AGENT);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING_AGENT);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const stack = error instanceof Error ? error.stack : undefined;
-      logger.error(`Erro ao retomar issue #${issue.number}`, { message, stack });
-      await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING_AGENT)
-        .catch(() => { });
+      logger.error(`[${label}] Erro ao retomar issue #${issue.number}`, { message, stack });
+      await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING_AGENT).catch(() => {});
     }
   }
 
-  private async processAgentPlanIssues(): Promise<void> {
-    const issues = await this.github.getIssuesWithLabel(env.LABEL_PLAN);
+  private async processAgentPlanIssues(project: ProjectContext): Promise<void> {
+    const { github, agentRunner, label } = project;
+    const issues = await github.getIssuesWithLabel(env.LABEL_PLAN);
     if (issues.length === 0) {
-      logger.debug('Nenhuma issue com agent-plan encontrada');
+      logger.debug(`[${label}] Nenhuma issue com agent-plan encontrada`);
       return;
     }
-    logger.info(`Criando plano para ${issues.length} issue(s) com agent-plan`);
+    logger.info(`[${label}] Criando plano para ${issues.length} issue(s)`);
     const limit = pLimit(1);
-    await Promise.allSettled(issues.map(issue => limit(() => this.createPlanWithIsolation(issue))));
+    await Promise.allSettled(issues.map(issue => limit(() => this.createPlanWithIsolation(project, issue))));
   }
 
-  private async createPlanWithIsolation(issue: GitHubIssue): Promise<void> {
+  private async createPlanWithIsolation(project: ProjectContext, issue: GitHubIssue): Promise<void> {
+    const { github, agentRunner, label } = project;
     try {
-      await this.github.transitionLabel(issue.number, env.LABEL_PLAN, env.LABEL_PROCESSING);
-      const result = await this.agentRunner.createPlan(issue);
+      await github.transitionLabel(issue.number, env.LABEL_PLAN, env.LABEL_PROCESSING);
+      const result = await agentRunner.createPlan(issue);
 
       if (result.type === 'plan-ready') {
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_PLAN_REVIEW);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_PLAN_REVIEW);
         const planBranch = `agent/plan-${issue.number}`;
-        const planMd = await this.github.readFileFromBranch(planBranch, '.agent-plan.md');
+        const planMd = await github.readFileFromBranch(planBranch, '.agent-plan.md');
         const body =
           `📋 **Plano gerado para revisão**\n\n` +
           (planMd ? planMd : '(ver `.agent-plan.md` na branch `' + planBranch + '`)') +
           `\n\n---\nRevisado o plano:\n- Se estiver correto: adicione o label \`agent-plan-approved\`\n` +
           `- Se quiser mudanças: comente o que alterar e recoloque o label \`agent-plan\``;
-        await this.github.postComment(issue.number, body);
-        logger.info(`Plano #${issue.number} pronto para revisão`);
+        await github.postComment(issue.number, body);
+        logger.info(`[${label}] Plano #${issue.number} pronto para revisão`);
       } else if (result.type === 'needs-clarification') {
-        await this.github.postComment(issue.number, result.question);
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
+        await github.postComment(issue.number, result.question);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
       } else if (result.type === 'rate-limit') {
         this.rateLimitState.recordHit(result.retryAfterMs);
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_PLAN);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_PLAN);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.error(`Erro ao criar plano para issue #${issue.number}`, { message });
-      await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_PLAN).catch(() => {});
+      logger.error(`[${label}] Erro ao criar plano #${issue.number}`, { message });
+      await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_PLAN).catch(() => {});
     }
   }
 
-  private async processApprovedPlans(): Promise<void> {
-    const issues = await this.github.getIssuesWithLabel(env.LABEL_PLAN_APPROVED);
+  private async processApprovedPlans(project: ProjectContext): Promise<void> {
+    const { github, label } = project;
+    const issues = await github.getIssuesWithLabel(env.LABEL_PLAN_APPROVED);
     if (issues.length === 0) return;
-    logger.info(`Ativando ${issues.length} plano(s) aprovado(s)`);
+    logger.info(`[${label}] Ativando ${issues.length} plano(s) aprovado(s)`);
     const limit = pLimit(1);
-    await Promise.allSettled(issues.map(issue => limit(() => this.activatePlanWithIsolation(issue))));
+    await Promise.allSettled(issues.map(issue => limit(() => this.activatePlanWithIsolation(project, issue))));
   }
 
-  private async activatePlanWithIsolation(planIssue: GitHubIssue): Promise<void> {
+  private async activatePlanWithIsolation(project: ProjectContext, planIssue: GitHubIssue): Promise<void> {
+    const { github, label } = project;
     try {
-      await this.github.transitionLabel(planIssue.number, env.LABEL_PLAN_APPROVED, env.LABEL_PROCESSING);
+      await github.transitionLabel(planIssue.number, env.LABEL_PLAN_APPROVED, env.LABEL_PROCESSING);
 
       const planBranch = `agent/plan-${planIssue.number}`;
-      const planJson = await this.github.readFileFromBranch(planBranch, '.agent-plan.json');
+      const planJson = await github.readFileFromBranch(planBranch, '.agent-plan.json');
       if (!planJson) {
         throw new Error(`.agent-plan.json não encontrado na branch ${planBranch}`);
       }
@@ -281,7 +279,6 @@ export class Scheduler {
       const plan = JSON.parse(planJson) as PlanFile;
       const stepToIssue = new Map<number, number>();
 
-      // Cria issues filhas em ordem, resolvendo dependências pelo mapa step→issueNumber
       for (const step of plan.steps) {
         const resolvedDeps = step.dependsOn
           .map(s => stepToIssue.get(s))
@@ -299,40 +296,40 @@ export class Scheduler {
           ? `\n\n## Como testar\n\n${step.testInstructions}`
           : '';
         const body = `${step.body}${testSection}\n\n<!-- agent-plan-meta: ${metadata} -->`;
-        const issueNum = await this.github.createIssue(step.title, body, [env.LABEL_QUEUED]);
+        const issueNum = await github.createIssue(step.title, body, [env.LABEL_QUEUED]);
         stepToIssue.set(step.step, issueNum);
-        logger.info(`Issue #${issueNum} criada: ${step.title}`);
+        logger.info(`[${label}] Issue #${issueNum} criada: ${step.title}`);
       }
 
-      // Ativa as issues sem dependências
       for (const [stepNum, issueNum] of stepToIssue) {
         const step = plan.steps.find(s => s.step === stepNum)!;
         if (step.dependsOn.length === 0) {
-          await this.github.transitionLabel(issueNum, env.LABEL_QUEUED, env.LABEL_READY);
-          logger.info(`Issue #${issueNum} ativada (sem dependências)`);
+          await github.transitionLabel(issueNum, env.LABEL_QUEUED, env.LABEL_READY);
+          logger.info(`[${label}] Issue #${issueNum} ativada (sem dependências)`);
         }
       }
 
-      await this.github.transitionLabel(planIssue.number, env.LABEL_PROCESSING, env.LABEL_PLAN_RUNNING);
-      await this.github.postComment(
+      await github.transitionLabel(planIssue.number, env.LABEL_PROCESSING, env.LABEL_PLAN_RUNNING);
+      await github.postComment(
         planIssue.number,
         `🚀 **Plano ativado!** ${plan.steps.length} tarefas criadas.\n\n` +
         `As tarefas sem dependências já estão em \`agent-ready\`. ` +
         `As demais serão ativadas automaticamente à medida que as dependências forem mergeadas.`
       );
-      logger.info(`Plano #${planIssue.number} ativado com ${plan.steps.length} tarefas`);
+      logger.info(`[${label}] Plano #${planIssue.number} ativado com ${plan.steps.length} tarefas`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.error(`Erro ao ativar plano #${planIssue.number}`, { message });
-      await this.github.transitionLabel(planIssue.number, env.LABEL_PROCESSING, env.LABEL_PLAN_APPROVED).catch(() => {});
+      logger.error(`[${label}] Erro ao ativar plano #${planIssue.number}`, { message });
+      await github.transitionLabel(planIssue.number, env.LABEL_PROCESSING, env.LABEL_PLAN_APPROVED).catch(() => {});
     }
   }
 
-  private async checkQueuedIssues(): Promise<void> {
-    const queued = await this.github.getIssuesWithLabel(env.LABEL_QUEUED, 50);
+  private async checkQueuedIssues(project: ProjectContext): Promise<void> {
+    const { github, label } = project;
+    const queued = await github.getIssuesWithLabel(env.LABEL_QUEUED, 50);
     if (queued.length === 0) return;
 
-    logger.info(`Verificando ${queued.length} issue(s) em fila`);
+    logger.info(`[${label}] Verificando ${queued.length} issue(s) em fila`);
 
     for (const issue of queued) {
       const meta = parsePlanMetadata(issue.body ?? '');
@@ -340,81 +337,78 @@ export class Scheduler {
 
       try {
         const results = await Promise.all(
-          meta.dependsOn.map(depNum =>
-            this.github.isPRMergedIntoBranch(depNum, meta.planBranch)
-          )
+          meta.dependsOn.map(depNum => github.isPRMergedIntoBranch(depNum, meta.planBranch))
         );
 
         if (results.every(Boolean)) {
-          await this.github.transitionLabel(issue.number, env.LABEL_QUEUED, env.LABEL_READY);
-          logger.info(`Issue #${issue.number} desbloqueada — todas as dependências mergeadas`);
+          await github.transitionLabel(issue.number, env.LABEL_QUEUED, env.LABEL_READY);
+          logger.info(`[${label}] Issue #${issue.number} desbloqueada — todas as dependências mergeadas`);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.error(`Erro ao verificar dependências da issue #${issue.number}`, { message });
+        logger.error(`[${label}] Erro ao verificar dependências da issue #${issue.number}`, { message });
       }
     }
   }
 
-  private async checkPlanCompletion(): Promise<void> {
-    const running = await this.github.getIssuesWithLabel(env.LABEL_PLAN_RUNNING, 20);
+  private async checkPlanCompletion(project: ProjectContext): Promise<void> {
+    const { github, label } = project;
+    const running = await github.getIssuesWithLabel(env.LABEL_PLAN_RUNNING, 20);
     if (running.length === 0) return;
 
     for (const planIssue of running) {
       try {
-        const children = await this.github.getChildIssues(planIssue.number);
+        const children = await github.getChildIssues(planIssue.number);
         if (children.length === 0) continue;
 
         const allDone = children.every(c => c.labels.includes(env.LABEL_DONE));
         if (!allDone) {
           const done = children.filter(c => c.labels.includes(env.LABEL_DONE)).length;
-          logger.debug(`Plano #${planIssue.number}: ${done}/${children.length} etapas concluídas`);
+          logger.debug(`[${label}] Plano #${planIssue.number}: ${done}/${children.length} etapas concluídas`);
           continue;
         }
 
         const planBranch = `agent/plan-${planIssue.number}`;
+        await this.commitPlanSpec(github, label, planIssue.number, planBranch, planIssue.title);
 
-        // Gera o spec final e commita na plan branch antes de criar o PR
-        await this.commitPlanSpec(planIssue.number, planBranch, planIssue.title);
-
-        const existingPr = await this.github.findPRForBranch(planBranch).catch(() => null);
+        const existingPr = await github.findPRForBranch(planBranch).catch(() => null);
         if (existingPr) {
-          logger.info(`PR final do plano #${planIssue.number} já existe (#${existingPr.number})`);
-          await this.github.transitionLabel(planIssue.number, env.LABEL_PLAN_RUNNING, env.LABEL_DONE);
+          logger.info(`[${label}] PR final do plano #${planIssue.number} já existe (#${existingPr.number})`);
+          await github.transitionLabel(planIssue.number, env.LABEL_PLAN_RUNNING, env.LABEL_DONE);
           continue;
         }
 
-        const pr = await this.github.createPullRequest(
+        const pr = await github.createPullRequest(
           planIssue.number,
           planBranch,
           `feat: ${planIssue.title} (resolve #${planIssue.number})`,
           this.buildPlanPrBody(planIssue, children),
-          env.BASE_BRANCH
+          github.config.baseBranch
         );
 
-        await this.github.transitionLabel(planIssue.number, env.LABEL_PLAN_RUNNING, env.LABEL_DONE);
-        await this.github.postComment(
+        await github.transitionLabel(planIssue.number, env.LABEL_PLAN_RUNNING, env.LABEL_DONE);
+        await github.postComment(
           planIssue.number,
           `✅ **Plano concluído!** Todas as ${children.length} etapas foram implementadas.\n\n` +
           `**PR final:** ${pr.url}\n\n` +
           `O spec completo foi salvo em \`docs/specs/\` e viajará junto com o merge.`
         );
-        logger.info(`Plano #${planIssue.number} concluído. PR final: ${pr.url}`);
+        logger.info(`[${label}] Plano #${planIssue.number} concluído. PR final: ${pr.url}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.error(`Erro ao verificar conclusão do plano #${planIssue.number}`, { message });
+        logger.error(`[${label}] Erro ao verificar conclusão do plano #${planIssue.number}`, { message });
       }
     }
   }
 
-  private async commitPlanSpec(planIssueNumber: number, planBranch: string, title: string): Promise<void> {
+  private async commitPlanSpec(github: GitHubClient, label: string, planIssueNumber: number, planBranch: string, title: string): Promise<void> {
     const [planMd, contextMd] = await Promise.all([
-      this.github.readFileFromBranch(planBranch, '.agent-plan.md'),
-      this.github.readFileFromBranch(planBranch, '.agent-context.md'),
+      github.readFileFromBranch(planBranch, '.agent-plan.md'),
+      github.readFileFromBranch(planBranch, '.agent-context.md'),
     ]);
 
     if (!planMd && !contextMd) {
-      logger.warn(`Plano #${planIssueNumber}: sem .agent-plan.md nem .agent-context.md — spec não gerado`);
+      logger.warn(`[${label}] Plano #${planIssueNumber}: sem .agent-plan.md nem .agent-context.md — spec não gerado`);
       return;
     }
 
@@ -431,13 +425,8 @@ export class Scheduler {
     if (contextMd) sections.push(`## Histórico de implementação\n\n${contextMd}`);
 
     const specPath = `docs/specs/plan-${planIssueNumber}-${slug}.md`;
-    await this.github.commitFileToBranch(
-      planBranch,
-      specPath,
-      sections.join('\n\n'),
-      `docs: spec da feature "${title}" (#${planIssueNumber})`
-    );
-    logger.info(`Spec salvo em ${specPath} na branch ${planBranch}`);
+    await github.commitFileToBranch(planBranch, specPath, sections.join('\n\n'), `docs: spec da feature "${title}" (#${planIssueNumber})`);
+    logger.info(`[${label}] Spec salvo em ${specPath}`);
   }
 
   private buildPlanPrBody(planIssue: GitHubIssue, children: GitHubIssue[]): string {
@@ -463,74 +452,72 @@ O spec completo deste plano foi salvo em \`docs/specs/\` neste PR e ficará disp
 *Gerado automaticamente pelo GitHub Agent*`;
   }
 
-  private async processAgentReviewIssues(): Promise<void> {
-    const issues = await this.github.getIssuesWithLabel(env.LABEL_REVIEW, 50);
+  private async processAgentReviewIssues(project: ProjectContext): Promise<void> {
+    const { github, label } = project;
+    const issues = await github.getIssuesWithLabel(env.LABEL_REVIEW, 50);
 
     if (issues.length === 0) {
-      logger.debug('Nenhuma issue com agent-review encontrada');
+      logger.debug(`[${label}] Nenhuma issue com agent-review encontrada`);
       return;
     }
 
-    logger.info(`Aplicando review em ${issues.length} issue(s) com agent-review`);
+    logger.info(`[${label}] Aplicando review em ${issues.length} issue(s)`);
 
     const limit = pLimit(1);
     await Promise.allSettled(
-      issues.map((issue) => limit(() => this.reviewIssueWithIsolation(issue)))
+      issues.map((issue) => limit(() => this.reviewIssueWithIsolation(project, issue)))
     );
   }
 
-  private async reviewIssueWithIsolation(issue: GitHubIssue): Promise<void> {
+  private async reviewIssueWithIsolation(project: ProjectContext, issue: GitHubIssue): Promise<void> {
+    const { github, agentRunner, label } = project;
     try {
-      await this.github.transitionLabel(issue.number, env.LABEL_REVIEW, env.LABEL_PROCESSING);
+      await github.transitionLabel(issue.number, env.LABEL_REVIEW, env.LABEL_PROCESSING);
 
-      // Encontra o PR associado à branch desta issue
-      const branchName = this.github.getBranchName(issue.number);
-      const pr = await this.github.findPRForBranch(branchName).catch(() => null);
+      const branchName = github.getBranchName(issue.number);
+      const pr = await github.findPRForBranch(branchName).catch(() => null);
 
       if (!pr) {
-        logger.warn(`Issue #${issue.number} tem agent-review mas não tem PR aberto — devolvendo label`);
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_REVIEW);
+        logger.warn(`[${label}] Issue #${issue.number} tem agent-review mas não tem PR — devolvendo label`);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_REVIEW);
         return;
       }
 
-      // Busca os comentários de review do PR
-      const reviewComments = await this.github.getPRReviewComments(pr.number);
+      const reviewComments = await github.getPRReviewComments(pr.number);
 
       if (reviewComments.length === 0) {
-        logger.warn(`PR #${pr.number} não tem comentários de review — removendo label agent-review`);
-        await this.github.removeLabel(issue.number, env.LABEL_PROCESSING);
-        await this.github.removeLabel(issue.number, env.LABEL_REVIEW).catch(() => {});
+        logger.warn(`[${label}] PR #${pr.number} sem comentários de review — removendo label`);
+        await github.removeLabel(issue.number, env.LABEL_PROCESSING);
+        await github.removeLabel(issue.number, env.LABEL_REVIEW).catch(() => {});
         return;
       }
 
-      const result = await this.agentRunner.reviewIssue(issue, pr.number, reviewComments);
+      const result = await agentRunner.reviewIssue(issue, pr.number, reviewComments);
 
       if (result.type === 'success') {
-        await this.github.removeLabel(issue.number, env.LABEL_PROCESSING);
-        await this.github.addLabel(issue.number, env.LABEL_DONE).catch(() => {});
-        logger.info(`Issue #${issue.number} — review aplicado. PR: ${result.prUrl}`);
+        await github.removeLabel(issue.number, env.LABEL_PROCESSING);
+        await github.addLabel(issue.number, env.LABEL_DONE).catch(() => {});
+        logger.info(`[${label}] Issue #${issue.number} — review aplicado. PR: ${result.prUrl}`);
 
-        // Marca todas as threads do PR como resolvidas
-        const threadIds = await this.github.getUnresolvedThreadIds(pr.number).catch(() => []);
+        const threadIds = await github.getUnresolvedThreadIds(pr.number).catch(() => []);
         for (const threadId of threadIds) {
-          await this.github.resolveReviewThread(threadId).catch(() => {});
+          await github.resolveReviewThread(threadId).catch(() => {});
         }
         if (threadIds.length > 0) {
-          logger.info(`${threadIds.length} thread(s) do PR #${pr.number} marcadas como resolvidas`);
+          logger.info(`[${label}] ${threadIds.length} thread(s) do PR #${pr.number} resolvidas`);
         }
       } else if (result.type === 'needs-clarification') {
-        await this.github.postComment(issue.number, result.question);
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
+        await github.postComment(issue.number, result.question);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
       } else if (result.type === 'rate-limit') {
         this.rateLimitState.recordHit(result.retryAfterMs);
-        await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_REVIEW);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_REVIEW);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const stack = error instanceof Error ? error.stack : undefined;
-      logger.error(`Erro ao aplicar review na issue #${issue.number}`, { message, stack });
-      await this.github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_REVIEW)
-        .catch(() => {});
+      logger.error(`[${label}] Erro ao aplicar review na issue #${issue.number}`, { message, stack });
+      await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_REVIEW).catch(() => {});
     }
   }
 }

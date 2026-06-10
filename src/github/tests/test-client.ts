@@ -1,6 +1,8 @@
 import { GitHubClient } from '../client.js';
+import { loadProjects } from '../../config/project-config.js';
 
-const client = new GitHubClient();
+const [config] = loadProjects();
+const client = new GitHubClient(config);
 await client.init();
 await client.ensureLabelsExists();
 

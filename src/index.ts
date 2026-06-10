@@ -1,30 +1,41 @@
 import { env } from "./config/env.js";
+import { loadProjects, deriveCollectionName, projectLabel } from "./config/project-config.js";
 import { GitHubClient } from "./github/client.js";
 import { RagEngine } from "./rag/retriever.js";
 import { AgentRunner } from "./agent/runner.js";
-import { Scheduler } from "./scheduler/loop.js";
+import { Scheduler, ProjectContext } from "./scheduler/loop.js";
 import { logger } from "./utils/logger.js";
 import { startUIServer } from "./ui/server.js";
 
 async function main(): Promise<void> {
   startUIServer(env.UI_PORT);
 
-  logger.info('Github Agent iniciando...', {
-    repo: `${env.GITHUB_OWNER}/${env.GITHUB_REPO}`,
+  const projectConfigs = loadProjects();
+  logger.info(`Github Agent iniciando com ${projectConfigs.length} projeto(s)`, {
+    projects: projectConfigs.map(p => projectLabel(p)),
     pollInterval: env.POLL_INTERVAL_MINUTES,
-    maxIssuesPerRun: env.MAX_ISSUES_PER_RUN
   });
 
-  const github = new GitHubClient();
-  await github.init();
+  const projects: ProjectContext[] = [];
 
-  await github.ensureLabelsExists();
-  await github.resetStuckProcessingIssues();
+  for (const config of projectConfigs) {
+    const label = projectLabel(config);
+    logger.info(`[${label}] Inicializando...`);
 
-  const ragEngine = new RagEngine();
-  const agentRunner = new AgentRunner(github, ragEngine);
+    const github = new GitHubClient(config);
+    await github.init();
+    await github.ensureLabelsExists();
+    await github.resetStuckProcessingIssues();
 
-  const scheduler = new Scheduler(github, ragEngine, agentRunner);
+    const collectionName = deriveCollectionName(config);
+    const ragEngine = new RagEngine(collectionName, config.localPath);
+    const agentRunner = new AgentRunner(github, ragEngine, config);
+
+    projects.push({ label, github, ragEngine, agentRunner });
+    logger.info(`[${label}] Pronto`);
+  }
+
+  const scheduler = new Scheduler(projects);
 
   let shuttingDown = false;
   async function shutdown(signal: string): Promise<void> {
@@ -43,7 +54,6 @@ async function main(): Promise<void> {
   if (process.argv.includes('--run-once')) {
     logger.info('Modo --run-once: executando um único tick');
     scheduler.start();
-
     await new Promise<void>((resolve) => setTimeout(resolve, 30000));
     scheduler.stop();
     return;
@@ -51,7 +61,6 @@ async function main(): Promise<void> {
 
   scheduler.start();
   logger.info('Agent rodando. CTRL+C para parar.');
-
 }
 
 main().catch((error) => {

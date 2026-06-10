@@ -15,29 +15,31 @@ export interface RetrievalResult {
 export class RagEngine {
   private chroma: ChromaClient;
   private collectionName: string;
-  private static indexingPromise: Promise<void> | null = null;
+  private localPath: string;
+  private static indexingPromises = new Map<string, Promise<void>>();
 
-  constructor() {
+  constructor(collectionName: string, localPath: string) {
     this.chroma = new ChromaClient({ path: env.CHROMA_URL });
-    this.collectionName = `repo-${env.GITHUB_OWNER}-${env.GITHUB_REPO}`
-      .toLowerCase()
-      .replace(/[^a-z0-9-]/g, '-');
+    this.collectionName = collectionName;
+    this.localPath = localPath;
   }
 
   private async ensureIndexed(): Promise<void> {
-    if (RagEngine.indexingPromise) {
-      logger.info('Indexação já em curso — aguardando...');
-      await RagEngine.indexingPromise;
+    const existing = RagEngine.indexingPromises.get(this.collectionName);
+    if (existing) {
+      logger.info(`[${this.collectionName}] Indexação já em curso — aguardando...`);
+      await existing;
       return;
     }
 
-    logger.info('Coleção RAG não encontrada — iniciando indexação automática do repositório...');
-    RagEngine.indexingPromise = new RepositoryIndexer()
-      .index(env.REPO_LOCAL_PATH)
-      .finally(() => { RagEngine.indexingPromise = null; });
+    logger.info(`[${this.collectionName}] Coleção RAG não encontrada — iniciando indexação de ${this.localPath}...`);
+    const promise = new RepositoryIndexer(this.collectionName)
+      .index(this.localPath)
+      .finally(() => { RagEngine.indexingPromises.delete(this.collectionName); });
 
-    await RagEngine.indexingPromise;
-    logger.info('Indexação automática concluída — retomando RAG.');
+    RagEngine.indexingPromises.set(this.collectionName, promise);
+    await promise;
+    logger.info(`[${this.collectionName}] Indexação automática concluída — retomando RAG.`);
   }
 
   async retrieveContext(

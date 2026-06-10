@@ -5,17 +5,21 @@ import { GitHubIssue } from "./model/gihub-issue.js";
 import { GitHubComment } from "./model/github-comment.js";
 import { PullRequestResult } from "./model/pull-request-result.js";
 import { PRReviewComment } from "./model/pr-review-comment.js";
+import { ProjectConfig } from '../config/project-config.js';
 
 export class GitHubClient {
   private octokit: Octokit;
   private owner: string;
   private repo: string;
   private botLogin: string = '';
+  readonly config: ProjectConfig;
 
-  constructor() {
-    this.octokit = new Octokit({ auth: env.GITHUB_TOKEN, request: { timeout: 30000 } });
-    this.owner = env.GITHUB_OWNER;
-    this.repo = env.GITHUB_REPO;
+  constructor(config: ProjectConfig) {
+    const token = config.githubToken ?? env.GITHUB_TOKEN;
+    this.octokit = new Octokit({ auth: token, request: { timeout: 30000 } });
+    this.owner = config.owner;
+    this.repo = config.repo;
+    this.config = config;
   }
 
   async init(): Promise<void> {
@@ -201,13 +205,14 @@ export class GitHubClient {
     return `agent/issue-${issueNumber}`;
   }
 
-  async createBranch(issueNumber: number, baseBranch = env.BASE_BRANCH): Promise<string> {
+  async createBranch(issueNumber: number, baseBranch?: string): Promise<string> {
+    const resolvedBase = baseBranch ?? this.config.baseBranch;
     const branchName = this.getBranchName(issueNumber);
 
     const { data: ref } = await this.octokit.git.getRef({
       owner: this.owner,
       repo: this.repo,
-      ref: `heads/${baseBranch}`,
+      ref: `heads/${resolvedBase}`,
     });
 
     try {
@@ -217,7 +222,7 @@ export class GitHubClient {
         ref: `refs/heads/${branchName}`,
         sha: ref.object.sha,
       });
-      logger.info(`Branch criada: ${branchName} a partir de ${baseBranch}`);
+      logger.info(`Branch criada: ${branchName} a partir de ${resolvedBase}`);
     } catch (error: unknown) {
       if (isOctokitError(error) && error.status === 422) {
         logger.warn(`Branch ${branchName} já existe — reutilizando`);
@@ -235,7 +240,7 @@ export class GitHubClient {
     const { data: ref } = await this.octokit.git.getRef({
       owner: this.owner,
       repo: this.repo,
-      ref: `heads/${env.BASE_BRANCH}`,
+      ref: `heads/${this.config.baseBranch}`,
     });
 
     try {
@@ -245,7 +250,7 @@ export class GitHubClient {
         ref: `refs/heads/${branchName}`,
         sha: ref.object.sha,
       });
-      logger.info(`Plan branch criada: ${branchName} a partir de ${env.BASE_BRANCH}`);
+      logger.info(`Plan branch criada: ${branchName} a partir de ${this.config.baseBranch}`);
     } catch (error: unknown) {
       if (isOctokitError(error) && error.status === 422) {
         logger.warn(`Plan branch ${branchName} já existe — reutilizando`);
@@ -367,15 +372,16 @@ export class GitHubClient {
     branchName: string,
     title: string,
     body: string,
-    base = env.BASE_BRANCH
+    base?: string
   ): Promise<PullRequestResult> {
+    const resolvedBase = base ?? this.config.baseBranch;
     const { data: pr } = await this.octokit.pulls.create({
       owner: this.owner,
       repo: this.repo,
       title,
       body,
       head: branchName,
-      base,
+      base: resolvedBase,
     });
 
     logger.info(`PR #${pr.number} criado: ${pr.html_url}`);

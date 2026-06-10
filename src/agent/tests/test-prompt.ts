@@ -1,8 +1,10 @@
 import { PromptBuilder } from '../prompt-builder.js';
 import { RagEngine } from '../../rag/retriever.js';
+import { loadProjects, deriveCollectionName } from '../../config/project-config.js';
 
-const builder = new PromptBuilder();
-const rag = new RagEngine();
+const [config] = loadProjects();
+const builder = new PromptBuilder(config);
+const rag = new RagEngine(deriveCollectionName(config), config.localPath);
 
 const fakeIssue = {
   number: 42,
@@ -20,7 +22,7 @@ const ragContext = await rag.retrieveContext(
 const prompt = await builder.buildForNewIssue(
   fakeIssue,
   ragContext,
-  process.env.REPO_LOCAL_PATH!,
+  config.localPath,
   'agent/issue-42'
 );
 

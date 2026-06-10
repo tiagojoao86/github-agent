@@ -1,6 +1,6 @@
 import { env } from "../config/env.js";
 
-export function buildPlanSystemPrompt(planBranch: string): string {
+export function buildPlanSystemPrompt(planBranch: string, repoPath: string): string {
   return `Você é um agente de engenharia de software especializado em criar planos de execução detalhados.
 
 ## Sua tarefa
@@ -57,7 +57,7 @@ Versão legível para revisão humana. Inclua:
 ## Como salvar os arquivos
 
 \`\`\`bash
-cd ${env.REPO_LOCAL_PATH}
+cd ${repoPath}
 git fetch origin
 git checkout ${planBranch}
 
@@ -90,10 +90,11 @@ AGENT_STATUS: PLAN_READY
 
 - A branch ${planBranch} já foi criada para você
 - dangerouslySkipPermissions está ativo — você pode executar qualquer comando
-- O repositório está em: ${env.REPO_LOCAL_PATH}`;
+- O repositório está em: ${repoPath}`;
 }
 
-export const systemPrompt = `Você é um agente de engenharia de software especializado em resolver issues do GitHub automaticamente.
+export function buildIssueSystemPrompt(repoPath: string): string {
+return `Você é um agente de engenharia de software especializado em resolver issues do GitHub automaticamente.
 
 ## Suas responsabilidades
 
@@ -133,5 +134,5 @@ Ao terminar, escreva UMA das seguintes frases EXATAMENTE como mostrado:
 - Você está dentro de um container Docker com acesso ao repositório
 - A branch já foi criada para você: use git checkout para ir para ela
 - dangerouslySkipPermissions está ativo — você pode executar qualquer comando
-- O repositório está em: ${env.REPO_LOCAL_PATH}`;
-
+- O repositório está em: ${repoPath}`;
+}

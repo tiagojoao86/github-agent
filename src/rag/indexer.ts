@@ -38,9 +38,10 @@ export class RepositoryIndexer {
   private chroma: ChromaClient;
   private collectionName: string;
 
-  constructor() {
+  constructor(collectionName?: string) {
     this.chroma = new ChromaClient({ path: env.CHROMA_URL });
-    this.collectionName = `repo-${env.GITHUB_OWNER}-${env.GITHUB_REPO}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    this.collectionName = collectionName
+      ?? `repo-${env.GITHUB_OWNER}-${env.GITHUB_REPO}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
   }
 
   async index(repoPath: string): Promise<void> {

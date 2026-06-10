@@ -4,12 +4,13 @@ import { env } from '../config/env.js';
 import { GitHubIssue } from '../github/model/gihub-issue.js';
 import { RetrievalResult } from '../rag/retriever.js';
 import { logger } from '../utils/logger.js';
-import { systemPrompt, buildPlanSystemPrompt } from './prompt-base.js';
+import { buildIssueSystemPrompt, buildPlanSystemPrompt } from './prompt-base.js';
 import { execSync } from 'child_process';
 import { PlanMetadata } from '../github/model/plan-metadata.js';
 import { formatConversationForPrompt, buildConversationHistory } from './conversation.js';
 import type { GitHubComment } from '../github/model/github-comment.js';
 import type { PRReviewComment } from '../github/model/pr-review-comment.js';
+import { ProjectConfig } from '../config/project-config.js';
 
 export interface AgentPrompt {
   systemPrompt: string;
@@ -17,6 +18,7 @@ export interface AgentPrompt {
 }
 
 export class PromptBuilder {
+  constructor(private config: ProjectConfig) {}
 
   async buildForPlanCreation(
     issue: GitHubIssue,
@@ -65,7 +67,7 @@ Sinalize com AGENT_STATUS: PLAN_READY quando terminar.`;
     }
 
     return {
-      systemPrompt: buildPlanSystemPrompt(planBranch),
+      systemPrompt: buildPlanSystemPrompt(planBranch, repoPath),
       userPrompt,
     };
   }
@@ -202,7 +204,7 @@ O PR #${prNumber} já existe para esta issue. A tua tarefa é **aplicar as corre
 
 1. Vá para a branch correta:
    \`\`\`bash
-   cd ${env.REPO_LOCAL_PATH}
+   cd ${this.config.localPath}
    git checkout ${branchName}
    \`\`\`
 
@@ -253,7 +255,7 @@ ${reviewSection}`;
   }
 
   private buildSystemPrompt(): string {
-    return systemPrompt;
+    return buildIssueSystemPrompt(this.config.localPath);
   }
 
   private buildUserPrompt(params: {
@@ -295,7 +297,7 @@ ${ragSection}
 
 ## Issue a Resolver
 
-**Repositório:** ${env.GITHUB_OWNER}/${env.GITHUB_REPO}
+**Repositório:** ${this.config.owner}/${this.config.repo}
 **Issue #${issue.number}:** ${issue.title}
 **URL:** ${issue.htmlUrl}
 
@@ -306,7 +308,7 @@ ${issue.body ?? '(Sem descrição)'}
 
 1. Vá para a branch correta:
    \`\`\`bash
-   cd ${env.REPO_LOCAL_PATH}
+   cd ${this.config.localPath}
    git checkout ${branchName}
    \`\`\`
 
