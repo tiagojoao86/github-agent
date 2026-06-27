@@ -171,6 +171,53 @@ dev
 
 ---
 
+---
+
+## Configuração multi-projetos
+
+O agente suporta monitorar múltiplos repositórios em simultâneo.
+Em cada tick, os projetos são processados **sequencialmente** — um de cada vez —
+com o rate limit da API Anthropic partilhado entre todos.
+
+### Como configurar
+
+No `.env`, defina `PROJECTS` como um array JSON em vez das variáveis individuais:
+
+```bash
+PROJECTS='[
+  {"owner":"org","repo":"backend","localPath":"/workspace/backend","baseBranch":"dev"},
+  {"owner":"org","repo":"frontend","localPath":"/workspace/frontend","baseBranch":"main"}
+]'
+```
+
+Cada projeto pode ter opcionalmente um `githubToken` próprio — caso contrário herda o `GITHUB_TOKEN` global.
+
+### O que muda nos logs
+
+Cada operação é prefixada com `[owner/repo]` para fácil identificação:
+
+```
+=== Projeto: org/backend ===
+[org/backend] Processando 2 issue(s) com agent-ready
+[org/backend] Issue #15 resolvida. PR: https://...
+=== Projeto: org/frontend ===
+[org/frontend] Nenhuma issue com agent-ready encontrada
+```
+
+### Volumes Docker
+
+Cada `localPath` precisa de ser montado no `docker-compose.yml`:
+
+```yaml
+volumes:
+  - /caminho/local/backend:/workspace/backend
+  - /caminho/local/frontend:/workspace/frontend
+```
+
+O RAG de cada projeto usa uma coleção ChromaDB separada — não há interferência entre projetos.
+
+---
+
 ## Referência rápida
 
 | Situação | O que fazer |

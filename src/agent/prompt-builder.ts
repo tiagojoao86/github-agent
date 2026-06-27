@@ -104,10 +104,10 @@ Sinalize com AGENT_STATUS: PLAN_READY quando terminar.`;
     return { systemPrompt, userPrompt };
   }
 
-  // Tenta ler o CLAUDE.md do repositório para incluir como grounding.
+  // Tenta ler o arquivo de contexto do repositório para incluir como grounding.
   // Se não existir, usa o README.md como fallback.
   private async getProjectContext(repoPath: string): Promise<string> {
-    const candidates = ['CLAUDE.md', 'README.md', 'CONTRIBUTING.md'];
+    const candidates = ['CLAUDE.md', 'AGENTS.md', 'README.md', 'CONTRIBUTING.md'];
 
     for (const filename of candidates) {
       try {
