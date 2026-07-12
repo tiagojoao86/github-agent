@@ -6,4 +6,8 @@ set -e
 mkdir -p /app/logs
 chown node:node /app/logs
 
-exec runuser -u node -- node /app/dist/index.js
+if [ $# -eq 0 ]; then
+  exec runuser -u node -- node /app/dist/index.js
+else
+  exec runuser -u node -- "$@"
+fi

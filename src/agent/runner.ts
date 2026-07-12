@@ -11,13 +11,15 @@ import { PRReviewComment } from '../github/model/pr-review-comment.js';
 import { parsePlanMetadata } from '../github/model/plan-metadata.js';
 import { simpleGit, SimpleGit } from 'simple-git';
 import { eventBus, TokenUsage } from '../ui/event-bus.js';
-import { ProjectConfig } from '../config/project-config.js';
+import { ProjectConfig, DEFAULT_MODELS } from '../config/project-config.js';
 
 export type AgentResult =
   | { type: 'success'; prUrl: string }
   | { type: 'needs-clarification'; question: string }
   | { type: 'rate-limit'; retryAfterMs?: number }
-  | { type: 'plan-ready' };
+  | { type: 'plan-ready' }
+  | { type: 'code-review-approved' }
+  | { type: 'code-review-rejected'; problems: string };
 
 export class AgentRunner {
   private github: GitHubClient;
@@ -64,7 +66,7 @@ export class AgentRunner {
     );
 
     // 5. Roda o agente
-    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, false, false, baseBranch);
+    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, false, false, baseBranch, false, this.resolveModel('dev'));
   }
 
   async createPlan(issue: GitHubIssue): Promise<AgentResult> {
@@ -98,7 +100,7 @@ export class AgentRunner {
     );
 
     log.info(existingPlan ? 'Revisando plano' : 'Criando plano');
-    return this.runAgentSession(issue, planBranch, prompt.systemPrompt, prompt.userPrompt, false, false, this.config.baseBranch, true);
+    return this.runAgentSession(issue, planBranch, prompt.systemPrompt, prompt.userPrompt, false, false, this.config.baseBranch, true, this.resolveModel('plan'));
   }
 
   async resumeIssue(issue: GitHubIssue, humanResponse: string): Promise<AgentResult> {
@@ -125,7 +127,7 @@ export class AgentRunner {
     );
 
     log.info('Retomando issue com contexto da resposta humana');
-    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, true, false, baseBranch);
+    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, true, false, baseBranch, false, this.resolveModel('dev'));
   }
 
   async reviewIssue(issue: GitHubIssue, prNumber: number, reviewComments: PRReviewComment[]): Promise<AgentResult> {
@@ -150,7 +152,33 @@ export class AgentRunner {
     );
 
     log.info(`Aplicando review do PR #${prNumber} (${reviewComments.length} comentários)`);
-    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, false, true);
+    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, false, true, undefined, false, this.resolveModel('dev'));
+  }
+
+  private resolveModel(stage: 'plan' | 'dev' | 'review'): string {
+    return this.config.models?.[stage] ?? DEFAULT_MODELS[stage];
+  }
+
+  async codeReviewIssue(issue: GitHubIssue): Promise<AgentResult> {
+    const log = createContextLogger({ issueNumber: issue.number, phase: 'code-review' });
+
+    const planMeta = parsePlanMetadata(issue.body ?? '');
+    const baseBranch = planMeta?.planBranch ?? this.config.baseBranch;
+    const branchName = this.github.getBranchName(issue.number);
+
+    log.info(`Iniciando code review — branch: ${branchName}, base: ${baseBranch}`);
+
+    const branchDiff = await this.github.getBranchDiff(branchName, baseBranch);
+    const prompt = this.promptBuilder.buildForCodeReview(issue, branchDiff, baseBranch);
+    const model = this.resolveModel('review');
+
+    log.info(`Modelo de review: ${model}`);
+
+    return this.runAgentSession(
+      issue, branchName,
+      prompt.systemPrompt, prompt.userPrompt,
+      false, false, baseBranch, false, model
+    );
   }
 
   private async runAgentSession(
@@ -161,7 +189,8 @@ export class AgentRunner {
     isResume = false,
     isReview = false,
     prBaseBranch?: string,
-    isPlan = false
+    isPlan = false,
+    model?: string
   ): Promise<AgentResult> {
     const resolvedBaseBranch = prBaseBranch ?? this.config.baseBranch;
     const log = createContextLogger({ issueNumber: issue.number, phase: 'agent-session' });
@@ -188,6 +217,7 @@ export class AgentRunner {
           systemPrompt,
           cwd: this.config.localPath,
           abortController: controller,
+          model,
         })) {
           this.logMessage(message, log, issue.number, running);
 
@@ -302,6 +332,19 @@ export class AgentRunner {
     isPlan = false
   ): Promise<AgentResult> {
     const resolvedBaseBranch = prBaseBranch ?? this.config.baseBranch;
+
+    // Code review pelo modelo revisor
+    if (agentOutput.includes('REVIEW_STATUS: APPROVED')) {
+      log.info('Code review: aprovado');
+      return { type: 'code-review-approved' };
+    }
+
+    if (agentOutput.includes('REVIEW_STATUS: REJECTED')) {
+      const problemsMatch = agentOutput.match(/REVIEW_PROBLEMS:\s*([\s\S]*?)(?:\n\n|$)/);
+      const problems = problemsMatch?.[1]?.trim() ?? 'Problemas não especificados pelo revisor.';
+      log.info('Code review: rejeitado', { problems });
+      return { type: 'code-review-rejected', problems };
+    }
 
     // Plano pronto para revisão
     if (isPlan && agentOutput.includes('AGENT_STATUS: PLAN_READY')) {
@@ -498,18 +541,25 @@ Por favor, responda a este comentário com o esclarecimento e serei retomado aut
     systemPrompt: string;
     cwd: string;
     abortController: AbortController;
+    model?: string;
   }): AsyncIterable<any> {
     const claudeBin = process.env.CLAUDE_BIN ?? '/app/node_modules/.bin/claude';
 
     const spawnEnv = { ...process.env };
 
-    const proc = spawn(claudeBin, [
+    const args = [
       '--print',
       '--verbose',
       '--output-format', 'stream-json',
       '--dangerously-skip-permissions',
       '--append-system-prompt', params.systemPrompt,
-    ], {
+    ];
+
+    if (params.model) {
+      args.push('--model', params.model);
+    }
+
+    const proc = spawn(claudeBin, args, {
       cwd: params.cwd,
       env: spawnEnv,
       signal: params.abortController.signal,

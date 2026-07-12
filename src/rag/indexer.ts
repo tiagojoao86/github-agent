@@ -1,7 +1,9 @@
 import { ChromaClient, Collection } from 'chromadb';
 import { readdir, readFile, stat } from 'fs/promises';
 import { join, extname, relative } from 'path';
+import { simpleGit } from 'simple-git';
 import { env } from '../config/env.js';
+import { loadProjects, deriveCollectionName, ProjectConfig } from '../config/project-config.js';
 import { logger } from '../utils/logger.js';
 
 // Extensões de arquivo que vamos indexar
@@ -38,10 +40,9 @@ export class RepositoryIndexer {
   private chroma: ChromaClient;
   private collectionName: string;
 
-  constructor(collectionName?: string) {
+  constructor(collectionName: string) {
     this.chroma = new ChromaClient({ path: env.CHROMA_URL });
-    this.collectionName = collectionName
-      ?? `repo-${env.GITHUB_OWNER}-${env.GITHUB_REPO}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    this.collectionName = collectionName;
   }
 
   async index(repoPath: string): Promise<void> {
@@ -245,8 +246,32 @@ export class RepositoryIndexer {
   }
 }
 
-if (process.argv[1].endsWith('indexer.ts') || process.argv[1].endsWith('indexer.js')) {
-  const indexer = new RepositoryIndexer();
-  await indexer.index(env.REPO_LOCAL_PATH);
+async function syncAndIndex(project: ProjectConfig): Promise<void> {
+  const git = simpleGit(project.localPath);
+  logger.info(`[${project.repo}] Sincronizando branch base: ${project.baseBranch}`);
+  await git.fetch('origin');
+  await git.checkout(project.baseBranch);
+  await git.pull('origin', project.baseBranch);
+  logger.info(`[${project.repo}] Branch ${project.baseBranch} atualizada`);
+
+  const indexer = new RepositoryIndexer(deriveCollectionName(project));
+  await indexer.index(project.localPath);
+}
+
+if (process.argv[1]?.endsWith('indexer.ts') || process.argv[1]?.endsWith('indexer.js')) {
+  const filterRepo = process.argv[2];
+  const allProjects = loadProjects();
+  const projects = filterRepo
+    ? allProjects.filter(p => p.repo === filterRepo)
+    : allProjects;
+
+  if (filterRepo && projects.length === 0) {
+    logger.error(`Repo "${filterRepo}" não encontrado em PROJECTS. Disponíveis: ${allProjects.map(p => p.repo).join(', ')}`);
+    process.exit(1);
+  }
+
+  for (const project of projects) {
+    await syncAndIndex(project);
+  }
 }
 

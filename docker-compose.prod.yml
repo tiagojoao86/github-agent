@@ -51,13 +51,13 @@ services:
       LOG_LEVEL: info
       CHROMA_URL: http://chromadb:8000
       OLLAMA_URL: http://ollama:11434
-      REPO_LOCAL_PATH: /workspace/repo
       TZ: America/Sao_Paulo
     env_file:
       - .env
     volumes:
-      - ./workspace/repo:/workspace/repo
+      - ./workspace:/workspace
       - ./logs:/app/logs
+      - ./projects.json:/app/projects.json
     restart: unless-stopped
 
   indexer:
@@ -71,11 +71,11 @@ services:
     environment:
       CHROMA_URL: http://chromadb:8000
       OLLAMA_URL: http://ollama:11434
-      REPO_LOCAL_PATH: /workspace/repo
     env_file:
       - .env
     volumes:
-      - ./workspace/repo:/workspace/repo
+      - ./workspace:/workspace
+      - ./projects.json:/app/projects.json
     command: ["node", "dist/rag/indexer.js"]
     profiles:
       - indexer

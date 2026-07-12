@@ -121,6 +121,7 @@ export class GitHubClient {
       { name: env.LABEL_PLAN_APPROVED, color: '0e8a16', description: 'Plano aprovado — criar tarefas' },
       { name: env.LABEL_PLAN_RUNNING,  color: 'e6ac00', description: 'Plano em execução' },
       { name: env.LABEL_QUEUED,        color: 'cccccc', description: 'Aguardando dependências' },
+      { name: env.LABEL_CODE_REVIEW,   color: 'b60205', description: 'Aguardando code review do agente' },
     ];
 
     for (const labelDef of labelsToCreate) {
@@ -520,6 +521,25 @@ export class GitHubClient {
     });
 
     logger.info(`Comentário de review aplicado postado na issue #${issueNumber}`);
+  }
+
+  async getBranchDiff(branchName: string, baseBranch: string): Promise<string> {
+    const { data } = await this.octokit.repos.compareCommitsWithBasehead({
+      owner: this.owner,
+      repo: this.repo,
+      basehead: `${baseBranch}...${branchName}`,
+    });
+
+    const files = data.files ?? [];
+    if (files.length === 0) return '(nenhuma alteração encontrada)';
+
+    const sections = files.map(f => {
+      const header = `### ${f.filename} (${f.status}, +${f.additions}/-${f.deletions})`;
+      const patch = f.patch ? `\`\`\`diff\n${f.patch}\n\`\`\`` : '(arquivo binário ou sem patch disponível)';
+      return `${header}\n${patch}`;
+    });
+
+    return sections.join('\n\n');
   }
 
 }

@@ -366,6 +366,47 @@ Após aplicar as alterações pedidas, faz commit e sinaliza AGENT_STATUS: SUCCE
     return prompt;
   }
 
+  buildForCodeReview(issue: GitHubIssue, branchDiff: string, baseBranch: string): AgentPrompt {
+    const systemPrompt = `És um revisor de código especializado. A tua tarefa é verificar se o código implementado numa branch resolve corretamente os requisitos descritos na issue.
+
+Analisa cuidadosamente:
+1. Se TODOS os requisitos da issue foram implementados
+2. Se há bugs óbvios ou problemas de lógica
+3. Se o código segue as boas práticas do projeto
+4. Se há casos edge não tratados que a issue menciona
+
+Responde com exatamente um dos dois formatos:
+
+Se a implementação está correta:
+REVIEW_STATUS: APPROVED
+REVIEW_SUMMARY: <resumo em 1-2 frases do que foi implementado>
+
+Se há problemas:
+REVIEW_STATUS: REJECTED
+REVIEW_PROBLEMS:
+- <problema 1 claro e acionável>
+- <problema 2>
+...`;
+
+    const userPrompt = `## Issue a verificar
+
+**Issue #${issue.number}:** ${issue.title}
+
+**Descrição completa:**
+${issue.body ?? '(Sem descrição)'}
+
+## Código implementado (diff da branch \`${baseBranch}\`)
+
+${branchDiff}
+
+## Instruções
+
+Verifica se o diff acima resolve corretamente todos os requisitos da issue.
+Responde com REVIEW_STATUS: APPROVED ou REVIEW_STATUS: REJECTED conforme as instruções do sistema.`;
+
+    return { systemPrompt, userPrompt };
+  }
+
   private formatRagContext(ragContext: RetrievalResult): string {
     if (ragContext.chunks.length === 0) {
       return '(Nenhum arquivo relevante encontrado no índice — verifique se o repositório foi indexado)';

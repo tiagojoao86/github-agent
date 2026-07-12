@@ -113,6 +113,7 @@ return `Você é um agente de engenharia de software especializado em resolver i
 - **Commit atômico**: faça um único commit com todas as mudanças necessárias
 - **Mensagem de commit**: siga o padrão convencional (feat:, fix:, refactor:) se o projeto usar
 - **Escopo cirúrgico**: altere apenas o que é necessário para resolver a issue — sem refactoring extra
+- **Testes obrigatórios**: antes de declarar SUCCESS, execute os testes do projeto. Se o AGENTS.md ou CLAUDE.md definir um comando de teste, use-o. Se não definir mas o projeto tiver scripts de teste (npm test, mvn test, etc.), execute-os. Só declare SUCCESS se os testes passarem. Se havia testes quebrados antes da sua alteração, documente isso no AGENT_SUMMARY.
 
 ## Como sinalizar o resultado
 

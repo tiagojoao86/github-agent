@@ -111,6 +111,7 @@ export class Scheduler {
     await this.checkPlanCompletion(project);
     await this.processReadyIssues(project);
     await this.resumeWaitingForAgentIssues(project);
+    await this.processCodeReviewIssues(project);
     await this.processAgentReviewIssues(project);
   }
 
@@ -160,10 +161,10 @@ export class Scheduler {
       const result = await agentRunner.processIssue(issue);
 
       if (result.type === 'success') {
-        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_DONE);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_CODE_REVIEW);
         await github.removeLabel(issue.number, env.LABEL_WAITING).catch(() => {});
         await github.removeLabel(issue.number, env.LABEL_WAITING_AGENT).catch(() => {});
-        logger.info(`[${label}] Issue #${issue.number} resolvida. PR: ${result.prUrl}`);
+        logger.info(`[${label}] Issue #${issue.number} implementada — aguardando code review. PR: ${result.prUrl}`);
       } else if (result.type === 'needs-clarification') {
         await github.postComment(issue.number, result.question);
         await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
@@ -194,10 +195,10 @@ export class Scheduler {
       const result = await agentRunner.resumeIssue(issue, conversationContext);
 
       if (result.type === 'success') {
-        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_DONE);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_CODE_REVIEW);
         await github.removeLabel(issue.number, env.LABEL_WAITING).catch(() => {});
         await github.removeLabel(issue.number, env.LABEL_WAITING_AGENT).catch(() => {});
-        logger.info(`[${label}] Issue #${issue.number} resolvida. PR: ${result.prUrl}`);
+        logger.info(`[${label}] Issue #${issue.number} retomada e implementada — aguardando code review. PR: ${result.prUrl}`);
       } else if (result.type === 'needs-clarification') {
         await github.postComment(issue.number, result.question);
         await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
@@ -450,6 +451,75 @@ O spec completo deste plano foi salvo em \`docs/specs/\` neste PR e ficará disp
 
 ---
 *Gerado automaticamente pelo GitHub Agent*`;
+  }
+
+  private async processCodeReviewIssues(project: ProjectContext): Promise<void> {
+    const { github, agentRunner, label } = project;
+    const issues = await github.getIssuesWithLabel(env.LABEL_CODE_REVIEW, 50);
+
+    if (issues.length === 0) {
+      logger.debug(`[${label}] Nenhuma issue com agent-code-review encontrada`);
+      return;
+    }
+
+    logger.info(`[${label}] Iniciando code review de ${issues.length} issue(s)`);
+
+    const limit = pLimit(1);
+    await Promise.allSettled(
+      issues.map((issue) => limit(() => this.codeReviewWithIsolation(project, issue)))
+    );
+  }
+
+  private async codeReviewWithIsolation(project: ProjectContext, issue: GitHubIssue): Promise<void> {
+    const { github, agentRunner, label } = project;
+    try {
+      await github.transitionLabel(issue.number, env.LABEL_CODE_REVIEW, env.LABEL_PROCESSING);
+
+      const result = await agentRunner.codeReviewIssue(issue);
+
+      if (result.type === 'code-review-approved') {
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_DONE);
+        await github.postComment(
+          issue.number,
+          `✅ **Code review aprovado pelo agente revisor.**\n\nA implementação resolve corretamente os requisitos da issue. O PR está pronto para revisão humana.`
+        );
+        logger.info(`[${label}] Issue #${issue.number}: code review aprovado → agent-done`);
+      } else if (result.type === 'code-review-rejected') {
+        const allComments = await github.getComments(issue.number);
+        const rejectionCount = allComments.filter(c =>
+          c.body?.includes('🔴 **Code review rejeitado')
+        ).length;
+
+        await github.postComment(
+          issue.number,
+          `🔴 **Code review rejeitado pelo agente revisor.**\n\nForam encontrados os seguintes problemas:\n\n${result.problems}\n\nA issue foi devolvida para reimplementação.`
+        );
+
+        if (rejectionCount >= 2) {
+          await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
+          await github.postComment(
+            issue.number,
+            `⚠️ **Intervenção humana necessária.**\n\nO agente rejeitou esta implementação ${rejectionCount + 1} vezes consecutivas sem conseguir resolver os problemas. Por favor, revise manualmente os comentários de rejeição acima, ajuste os requisitos na issue se necessário, e aplique a label \`agent-ready\` para tentar novamente.`
+          );
+          logger.info(`[${label}] Issue #${issue.number}: code review rejeitado ${rejectionCount + 1}x → escalado para humano`);
+        } else {
+          await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_READY);
+          logger.info(`[${label}] Issue #${issue.number}: code review rejeitado (tentativa ${rejectionCount + 1}) → agent-ready`);
+        }
+      } else if (result.type === 'rate-limit') {
+        this.rateLimitState.recordHit(result.retryAfterMs);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_CODE_REVIEW);
+        logger.info(`[${label}] Issue #${issue.number}: rate limit durante code review — devolvida`);
+      } else {
+        // resultado inesperado — devolve para code review para tentar novamente
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_CODE_REVIEW);
+        logger.warn(`[${label}] Issue #${issue.number}: resultado inesperado no code review: ${result.type}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`[${label}] Erro no code review da issue #${issue.number}`, { message });
+      await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_CODE_REVIEW).catch(() => {});
+    }
   }
 
   private async processAgentReviewIssues(project: ProjectContext): Promise<void> {

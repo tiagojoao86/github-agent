@@ -31,7 +31,7 @@ RUN git config --global user.email "agent@github-bot.local" && \
     git config --global user.name "GitHub Agent" && \
     git config --global credential.helper \
       '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f' && \
-    git config --global safe.directory /workspace/repo
+    git config --global safe.directory '*'
 
 USER root
 COPY entrypoint.sh /entrypoint.sh

@@ -26,9 +26,9 @@ export const env = {
 
 
   // GitHub
-  GITHUB_TOKEN: requireEnv('GITHUB_TOKEN'),
-  GITHUB_OWNER: requireEnv('GITHUB_OWNER'),
-  GITHUB_REPO: requireEnv('GITHUB_REPO'),
+  GITHUB_TOKEN: optionalEnv('GITHUB_TOKEN', ''),
+  GITHUB_OWNER: optionalEnv('GITHUB_OWNER', ''),
+  GITHUB_REPO: optionalEnv('GITHUB_REPO', ''),
 
   // Scheduler
   POLL_INTERVAL_MINUTES: parseInt(optionalEnv('POLL_INTERVAL_MINUTES', '5'), 10),
@@ -40,7 +40,7 @@ export const env = {
 
   // RAG
   CHROMA_URL: optionalEnv('CHROMA_URL', 'http://localhost:8000'),
-  REPO_LOCAL_PATH: requireEnv('REPO_LOCAL_PATH'),
+  REPO_LOCAL_PATH: optionalEnv('REPO_LOCAL_PATH', ''),
   EMBEDDING_MODEL: optionalEnv('EMBEDDING_MODEL', 'nomic-embed-text'),
 
   // UI Dashboard
@@ -56,6 +56,7 @@ export const env = {
   LABEL_WAITING_AGENT: 'waiting-for-agent',
   LABEL_DONE: 'agent-done',
   LABEL_REVIEW: 'agent-review',
+  LABEL_CODE_REVIEW: 'agent-code-review',
   LABEL_PLAN: 'agent-plan',
   LABEL_PLAN_REVIEW: 'agent-plan-review',
   LABEL_PLAN_APPROVED: 'agent-plan-approved',
