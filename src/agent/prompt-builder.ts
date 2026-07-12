@@ -89,16 +89,20 @@ Sinalize com AGENT_STATUS: PLAN_READY quando terminar.`;
     ragContext: RetrievalResult,
     repoPath: string,
     branchName: string,
-    allComments: GitHubComment[]
+    allComments: GitHubComment[],
+    planMeta?: PlanMetadata | null
   ): Promise<AgentPrompt> {
     const projectContext = await this.getProjectContext(repoPath);
     const ragSection = this.formatRagContext(ragContext);
     const conversationHistory = buildConversationHistory(allComments);
     const conversationFormatted = formatConversationForPrompt(conversationHistory);
+    const planContext = planMeta ? await this.getPlanContext(repoPath, planMeta.planBranch) : null;
 
     const systemPrompt = this.buildSystemPrompt();
     const userPrompt = this.buildUserPrompt({
-      projectContext, ragSection, issue, branchName, previousConversation: conversationFormatted,
+      projectContext, ragSection, issue, branchName,
+      previousConversation: conversationFormatted,
+      planContext, planMeta,
     });
 
     return { systemPrompt, userPrompt };
@@ -366,7 +370,7 @@ Após aplicar as alterações pedidas, faz commit e sinaliza AGENT_STATUS: SUCCE
     return prompt;
   }
 
-  buildForCodeReview(issue: GitHubIssue, branchDiff: string, baseBranch: string): AgentPrompt {
+  buildForCodeReview(issue: GitHubIssue, branchDiff: string, baseBranch: string, comments: GitHubComment[] = []): AgentPrompt {
     const systemPrompt = `És um revisor de código especializado. A tua tarefa é verificar se o código implementado numa branch resolve corretamente os requisitos descritos na issue.
 
 Analisa cuidadosamente:
@@ -374,10 +378,13 @@ Analisa cuidadosamente:
 2. Se há bugs óbvios ou problemas de lógica
 3. Se o código segue as boas práticas do projeto
 4. Se há casos edge não tratados que a issue menciona
+5. Se há erros reportados nos comentários da issue (falhas de build, testes, checkstyle, etc.) que ainda não foram resolvidos
+
+Se qualquer comentário de humano ou rejeição anterior reportar falhas concretas (testes falhando, erros de compilação, checkstyle, etc.), REJEITA a implementação mesmo que o diff pareça correto — o código precisa estar funcionando, não só escrito.
 
 Responde com exatamente um dos dois formatos:
 
-Se a implementação está correta:
+Se a implementação está correta e sem falhas reportadas:
 REVIEW_STATUS: APPROVED
 REVIEW_SUMMARY: <resumo em 1-2 frases do que foi implementado>
 
@@ -388,6 +395,13 @@ REVIEW_PROBLEMS:
 - <problema 2>
 ...`;
 
+    const humanComments = comments.filter(c => !c.isBot && c.body?.trim());
+    const commentsSection = humanComments.length > 0
+      ? `## Comentários e feedback na issue\n\n${humanComments.map(c =>
+          `**${c.author}** (${new Date(c.createdAt).toLocaleDateString('pt-BR')}):\n${c.body}`
+        ).join('\n\n---\n\n')}`
+      : '';
+
     const userPrompt = `## Issue a verificar
 
 **Issue #${issue.number}:** ${issue.title}
@@ -395,13 +409,15 @@ REVIEW_PROBLEMS:
 **Descrição completa:**
 ${issue.body ?? '(Sem descrição)'}
 
-## Código implementado (diff da branch \`${baseBranch}\`)
+${commentsSection}
+
+## Código implementado (diff em relação a \`${baseBranch}\`)
 
 ${branchDiff}
 
 ## Instruções
 
-Verifica se o diff acima resolve corretamente todos os requisitos da issue.
+Verifica se o diff acima resolve corretamente todos os requisitos da issue, levando em conta os comentários acima.
 Responde com REVIEW_STATUS: APPROVED ou REVIEW_STATUS: REJECTED conforme as instruções do sistema.`;
 
     return { systemPrompt, userPrompt };

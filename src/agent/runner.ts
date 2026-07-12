@@ -56,17 +56,20 @@ export class AgentRunner {
     const ragContext = await this.ragEngine.retrieveContext(query_text);
     log.info(`RAG: ${ragContext.chunks.length} chunks recuperados`);
 
-    // 4. Monta o prompt (com contexto do plano se aplicável)
-    const prompt = await this.promptBuilder.buildForNewIssue(
-      issue,
-      ragContext,
-      this.config.localPath,
-      branchName,
-      planMeta
-    );
+    // 4. Monta o prompt — inclui histórico de comentários se existir (retentativa com feedback)
+    const allComments = await this.github.getComments(issue.number);
+    const hasHistory = allComments.some(c => c.body?.trim());
+
+    const prompt = hasHistory
+      ? await this.promptBuilder.buildForResumedIssueWithHistory(
+          issue, ragContext, this.config.localPath, branchName, allComments, planMeta
+        )
+      : await this.promptBuilder.buildForNewIssue(
+          issue, ragContext, this.config.localPath, branchName, planMeta
+        );
 
     // 5. Roda o agente
-    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, false, false, baseBranch, false, this.resolveModel('dev'));
+    return this.runAgentSession(issue, branchName, prompt.systemPrompt, prompt.userPrompt, hasHistory, false, baseBranch, false, this.resolveModel('dev'));
   }
 
   async createPlan(issue: GitHubIssue): Promise<AgentResult> {
@@ -169,7 +172,8 @@ export class AgentRunner {
     log.info(`Iniciando code review — branch: ${branchName}, base: ${baseBranch}`);
 
     const branchDiff = await this.github.getBranchDiff(branchName, baseBranch);
-    const prompt = this.promptBuilder.buildForCodeReview(issue, branchDiff, baseBranch);
+    const issueComments = await this.github.getComments(issue.number);
+    const prompt = this.promptBuilder.buildForCodeReview(issue, branchDiff, baseBranch, issueComments);
     const model = this.resolveModel('review');
 
     log.info(`Modelo de review: ${model}`);
