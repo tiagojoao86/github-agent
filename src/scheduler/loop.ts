@@ -565,9 +565,9 @@ O spec completo deste plano foi salvo em \`docs/specs/\` neste PR e ficará disp
       const result = await agentRunner.reviewIssue(issue, pr.number, reviewComments);
 
       if (result.type === 'success') {
-        await github.removeLabel(issue.number, env.LABEL_PROCESSING);
-        await github.addLabel(issue.number, env.LABEL_DONE).catch(() => {});
-        logger.info(`[${label}] Issue #${issue.number} — review aplicado. PR: ${result.prUrl}`);
+        await github.addLabel(issue.number, env.LABEL_CODE_REVIEW).catch(() => {});
+        await github.removeLabel(issue.number, env.LABEL_PROCESSING).catch(() => {});
+        logger.info(`[${label}] Issue #${issue.number} — review aplicado, enviando para code review automático. PR: ${result.prUrl}`);
 
         const threadIds = await github.getUnresolvedThreadIds(pr.number).catch(() => []);
         for (const threadId of threadIds) {
