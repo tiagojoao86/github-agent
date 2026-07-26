@@ -267,6 +267,47 @@
     <div id="project-list"></div>
     <button class="btn-primary" onclick="openAddModal()" style="margin-top:8px">+ Adicionar projeto</button>
   </div>
+
+  <div class="cfg-section">
+    <div class="cfg-title">Como gerar o token do GitHub</div>
+    <div style="font-size:11px;color:#888;line-height:1.7;background:#252526;border:1px solid #3c3c3c;border-radius:4px;padding:12px 14px;">
+      <div style="margin-bottom:8px">
+        Acesse <span style="color:#4ec9b0">GitHub → Settings → Developer settings → Personal access tokens</span>
+      </div>
+      <div style="margin-bottom:10px">
+        Use <strong style="color:#9cdcfe">Fine-grained token</strong> (recomendado) ou <strong style="color:#9cdcfe">Classic token</strong>:
+      </div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:10px">
+        <tr style="color:#666;font-size:10px;text-transform:uppercase;letter-spacing:.05em">
+          <td style="padding:3px 8px 3px 0">Permissão</td>
+          <td style="padding:3px 8px">Nível</td>
+          <td style="padding:3px 0;color:#555">Necessário para</td>
+        </tr>
+        <tr style="border-top:1px solid #3c3c3c">
+          <td style="padding:4px 8px 4px 0;color:#dcdcaa">Contents</td>
+          <td style="padding:4px 8px;color:#6a9955">Read and write</td>
+          <td style="padding:4px 0;color:#555">Criar branches, ler/escrever arquivos</td>
+        </tr>
+        <tr style="border-top:1px solid #3c3c3c">
+          <td style="padding:4px 8px 4px 0;color:#dcdcaa">Issues</td>
+          <td style="padding:4px 8px;color:#6a9955">Read and write</td>
+          <td style="padding:4px 0;color:#555">Ler issues, gerenciar labels e comentários</td>
+        </tr>
+        <tr style="border-top:1px solid #3c3c3c">
+          <td style="padding:4px 8px 4px 0;color:#dcdcaa">Pull requests</td>
+          <td style="padding:4px 8px;color:#6a9955">Read and write</td>
+          <td style="padding:4px 0;color:#555">Criar PRs, ler reviews, resolver threads</td>
+        </tr>
+        <tr style="border-top:1px solid #3c3c3c">
+          <td style="padding:4px 8px 4px 0;color:#dcdcaa">Metadata</td>
+          <td style="padding:4px 8px;color:#888">Read-only</td>
+          <td style="padding:4px 0;color:#555">Obrigatório em todos os tokens</td>
+        </tr>
+      </table>
+      <div style="color:#555">Classic token: marque apenas o escopo <span style="color:#dcdcaa">repo</span> (cobre tudo acima).</div>
+      <div style="margin-top:6px;color:#555">O token deve ter acesso ao repositório do projeto — em Fine-grained, selecione o repo específico em "Repository access".</div>
+    </div>
+  </div>
 </div>
 
 <!-- Add/Edit modal -->
@@ -291,8 +332,9 @@
         <input id="f-branch" placeholder="ex: dev" value="dev">
       </div>
       <div class="form-group full">
-        <label>GitHub token (pipadevagent)</label>
+        <label>GitHub token (pipadevagent) <span class="model-badge">opcional — usa GITHUB_TOKEN do .env se vazio</span></label>
         <input id="f-token" type="password" placeholder="ghp_...">
+        <span style="font-size:10px;color:#555;margin-top:2px">Fine-grained: Contents + Issues + Pull requests (Read/Write) + Metadata (Read). Classic: escopo <code style="color:#dcdcaa">repo</code>.</span>
       </div>
       <div class="form-section-label">Modelos <span class="model-badge">opcional — usa defaults se vazio</span></div>
       <div class="form-group">
