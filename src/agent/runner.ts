@@ -13,6 +13,12 @@ import { simpleGit, SimpleGit } from 'simple-git';
 import { eventBus, TokenUsage } from '../ui/event-bus.js';
 import { ProjectConfig, DEFAULT_MODELS } from '../config/project-config.js';
 
+function makeGit(config: ProjectConfig): SimpleGit {
+  const token = config.githubToken || env.GITHUB_TOKEN;
+  const git = simpleGit(config.localPath);
+  return token ? git.env({ ...process.env, GITHUB_TOKEN: token }) : git;
+}
+
 export type AgentResult =
   | { type: 'success'; prUrl: string }
   | { type: 'needs-clarification'; question: string }
@@ -46,7 +52,7 @@ export class AgentRunner {
     log.info(`Branch criada: ${branchName}`);
 
     // 2. Configura o git local para usar a branch
-    const git: SimpleGit = simpleGit(this.config.localPath);
+    const git: SimpleGit = makeGit(this.config);
     await git.fetch('origin');
     await git.checkout(branchName);
     log.info('Git local configurado na branch');
@@ -78,7 +84,7 @@ export class AgentRunner {
     const planBranch = await this.github.createPlanBranch(issue.number);
     log.info(`Plan branch: ${planBranch}`);
 
-    const git: SimpleGit = simpleGit(this.config.localPath);
+    const git: SimpleGit = makeGit(this.config);
     await git.fetch('origin');
     await git.checkout(planBranch);
 
@@ -113,7 +119,7 @@ export class AgentRunner {
     const baseBranch = planMeta?.planBranch ?? this.config.baseBranch;
     const branchName = this.github.getBranchName(issue.number);
 
-    const git = simpleGit(this.config.localPath);
+    const git = makeGit(this.config);
     await git.fetch('origin');
     await git.checkout(branchName);
 
@@ -138,7 +144,7 @@ export class AgentRunner {
 
     const branchName = this.github.getBranchName(issue.number);
 
-    const git = simpleGit(this.config.localPath);
+    const git = makeGit(this.config);
     await git.fetch('origin');
     await git.checkout(branchName);
 
@@ -360,7 +366,7 @@ export class AgentRunner {
     if (agentOutput.includes('AGENT_STATUS: SUCCESS')) {
       log.info('Agente sinalizou sucesso — verificando branch e PR');
 
-      const git = simpleGit(this.config.localPath);
+      const git = makeGit(this.config);
       const log_result = await git.log({ from: `origin/${resolvedBaseBranch}`, to: branchName }).catch(() => null);
 
       if (!log_result || log_result.total === 0) {
@@ -457,7 +463,7 @@ export class AgentRunner {
     }
 
     // 2. Há commits na branch?
-    const git = simpleGit(this.config.localPath);
+    const git = makeGit(this.config);
     const commits = await git.log({ from: `origin/${this.config.baseBranch}`, to: branchName }).catch(() => null);
     if (commits && commits.total > 0) {
       const resumeNote = isResume

@@ -247,7 +247,9 @@ export class RepositoryIndexer {
 }
 
 async function syncAndIndex(project: ProjectConfig): Promise<void> {
-  const git = simpleGit(project.localPath);
+  const token = project.githubToken || env.GITHUB_TOKEN;
+  const baseGit = simpleGit(project.localPath);
+  const git = token ? baseGit.env({ ...process.env, GITHUB_TOKEN: token }) : baseGit;
   logger.info(`[${project.repo}] Sincronizando branch base: ${project.baseBranch}`);
   await git.fetch('origin');
   await git.checkout(project.baseBranch);
