@@ -248,8 +248,11 @@ export class RepositoryIndexer {
 
 async function syncAndIndex(project: ProjectConfig): Promise<void> {
   const token = project.githubToken || env.GITHUB_TOKEN;
-  const baseGit = simpleGit(project.localPath);
-  const git = token ? baseGit.env({ ...process.env, GITHUB_TOKEN: token }) : baseGit;
+  const git = simpleGit(project.localPath);
+  if (token) {
+    const remoteUrl = `https://x-access-token:${token}@github.com/${project.owner}/${project.repo}.git`;
+    await git.remote(['set-url', 'origin', remoteUrl]);
+  }
   logger.info(`[${project.repo}] Sincronizando branch base: ${project.baseBranch}`);
   await git.fetch('origin');
   await git.checkout(project.baseBranch);
