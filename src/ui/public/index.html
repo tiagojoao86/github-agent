@@ -22,12 +22,33 @@
     #status-dot.running{background:#4ec9b0;animation:pulse 1.2s infinite}
     #status-dot.error{background:#f44747}
     #conn-badge{font-size:11px;color:#888}
-    #config-btn{
+    #config-btn,#manual-btn{
       background:transparent;border:1px solid #474747;color:#888;
       padding:2px 10px;font-size:11px;border-radius:2px;cursor:pointer;font-family:inherit;
     }
-    #config-btn:hover{border-color:#666;color:#ccc}
+    #config-btn:hover,#manual-btn:hover{border-color:#666;color:#ccc}
     #config-btn.active{border-color:#007acc;color:#4ec9b0}
+
+    /* ── Manual modal ── */
+    #manual-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;align-items:center;justify-content:center}
+    #manual-modal.visible{display:flex}
+    #manual-box{background:#1e1e1e;border:1px solid #3c3c3c;border-radius:4px;width:780px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column}
+    #manual-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #3c3c3c;font-size:12px;color:#9cdcfe}
+    #manual-body{overflow-y:auto;padding:20px 24px;font-size:12px;line-height:1.7;color:#d4d4d4}
+    #manual-body h1{font-size:16px;color:#9cdcfe;margin:0 0 14px}
+    #manual-body h2{font-size:13px;color:#9cdcfe;margin:22px 0 8px;border-bottom:1px solid #3c3c3c;padding-bottom:4px}
+    #manual-body h3{font-size:12px;color:#ce9178;margin:16px 0 6px}
+    #manual-body p{margin:6px 0}
+    #manual-body ul{margin:6px 0;padding-left:20px}
+    #manual-body li{margin:3px 0}
+    #manual-body code{background:#2d2d2d;padding:1px 5px;border-radius:2px;font-family:monospace;font-size:11px;color:#ce9178}
+    #manual-body pre{background:#2d2d2d;padding:12px;border-radius:3px;overflow-x:auto;margin:8px 0}
+    #manual-body pre code{background:none;padding:0;color:#d4d4d4}
+    #manual-body table{border-collapse:collapse;width:100%;margin:8px 0}
+    #manual-body th{background:#2d2d2d;padding:5px 10px;text-align:left;border:1px solid #3c3c3c;color:#9cdcfe}
+    #manual-body td{padding:5px 10px;border:1px solid #3c3c3c}
+    #manual-body hr{border:none;border-top:1px solid #3c3c3c;margin:16px 0}
+    #manual-body strong{color:#fff}
 
     /* ── Config panel ── */
     #config-panel{
@@ -231,6 +252,7 @@
     github-agent
   </div>
   <div style="display:flex;align-items:center;gap:10px">
+    <button id="manual-btn" onclick="openManual()">📖 Manual</button>
     <button id="config-btn" onclick="toggleConfig()">⚙ Configuração</button>
     <span id="conn-badge">⬤ conectando...</span>
   </div>
@@ -811,6 +833,106 @@ async function deleteProject(owner, repo) {
     loadProjectList();
   }
 }
+
+// ── Manual ───────────────────────────────────────────────────────────────────
+async function openManual() {
+  const modal = $('manual-modal');
+  const body = $('manual-body');
+  modal.classList.add('visible');
+  if (body.dataset.loaded) return;
+  body.innerHTML = '<span style="color:#555">Carregando...</span>';
+  try {
+    const res = await fetch('/api/manual');
+    const { content } = await res.json();
+    body.innerHTML = mdToHtml(content);
+    body.dataset.loaded = '1';
+  } catch {
+    body.innerHTML = '<span style="color:#f44747">Erro ao carregar o manual.</span>';
+  }
+}
+function closeManual() {
+  $('manual-modal').classList.remove('visible');
+}
+
+function mdToHtml(md) {
+  // Escapa HTML
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  // Blocos de código (``` ... ```)
+  md = md.replace(/```(\w*)\n([\s\S]*?)```/g, (_, _lang, code) =>
+    `<pre><code>${esc(code.trimEnd())}</code></pre>`);
+
+  // Código inline
+  md = md.replace(/`([^`]+)`/g, (_, c) => `<code>${esc(c)}</code>`);
+
+  const lines = md.split('\n');
+  const out = [];
+  let inTable = false, inUl = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+
+    // Já é bloco pre — passa direto
+    if (l.startsWith('<pre>') || l.startsWith('</pre>')) { if(inUl){out.push('</ul>');inUl=false;} out.push(l); continue; }
+    if (inTable && l.startsWith('<')) { out.push(l); continue; }
+
+    // Tabelas
+    if (l.includes('|') && l.trim().startsWith('|')) {
+      if (!inTable) { if(inUl){out.push('</ul>');inUl=false;} out.push('<table>'); inTable = true; }
+      const cells = l.split('|').slice(1,-1).map(c => c.trim());
+      const isSep = cells.every(c => /^[-: ]+$/.test(c));
+      if (isSep) continue;
+      const isHeader = i > 0 && lines[i-1].includes('|') && !lines[i-1].replace(/[|\- ]/g,'').trim();
+      // Check if previous line was separator
+      const prevWasSep = i > 0 && lines[i-1].split('|').slice(1,-1).every(c => /^[-: ]+$/.test(c.trim()));
+      const tag = (i === 0 || prevWasSep) ? ['<th>','</th>'] : ['<td>','</td>'];
+      out.push('<tr>' + cells.map(c => tag[0] + inlineMd(c) + tag[1]).join('') + '</tr>');
+      continue;
+    } else if (inTable) { out.push('</table>'); inTable = false; }
+
+    // Listas
+    if (/^- /.test(l)) {
+      if (!inUl) { out.push('<ul>'); inUl = true; }
+      out.push('<li>' + inlineMd(l.slice(2)) + '</li>');
+      continue;
+    } else if (inUl) { out.push('</ul>'); inUl = false; }
+
+    // Cabeçalhos
+    if (/^### /.test(l)) { out.push('<h3>' + inlineMd(l.slice(4)) + '</h3>'); continue; }
+    if (/^## /.test(l))  { out.push('<h2>' + inlineMd(l.slice(3)) + '</h2>'); continue; }
+    if (/^# /.test(l))   { out.push('<h1>' + inlineMd(l.slice(2)) + '</h1>'); continue; }
+
+    // HR
+    if (/^---+$/.test(l.trim())) { out.push('<hr>'); continue; }
+
+    // Parágrafo / vazio
+    if (l.trim() === '') { out.push('<p>'); continue; }
+    out.push('<p>' + inlineMd(l) + '</p>');
+  }
+  if (inUl) out.push('</ul>');
+  if (inTable) out.push('</table>');
+  return out.join('\n');
+}
+
+function inlineMd(s) {
+  const esc = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Bold+italic já escapado (s pode ter <code> tags do pré-processamento)
+  return s
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>');
+}
 </script>
+
+<!-- Manual modal -->
+<div id="manual-modal" onclick="if(event.target===this)closeManual()">
+  <div id="manual-box">
+    <div id="manual-header">
+      <span>📖 Manual do GitHub Agent</span>
+      <button onclick="closeManual()" style="background:none;border:none;color:#888;cursor:pointer;font-size:16px;line-height:1">✕</button>
+    </div>
+    <div id="manual-body"></div>
+  </div>
+</div>
 </body>
 </html>

@@ -180,6 +180,8 @@ Singleton `eventBus` (EventEmitter). Qualquer módulo pode chamar `eventBus.publ
 
 ## Como adicionar uma nova funcionalidade
 
+> **Importante:** qualquer alteração no comportamento do sistema visível ao utilizador (novos labels, novas fases, novos fluxos, mudança de critérios) deve ser documentada em `docs/MANUAL.md`. O manual é a referência de uso para humanos — mantê-lo actualizado é parte da tarefa, não opcional.
+
 ### Novo tipo de label/fase de processamento
 
 1. Adicione a constante em `src/config/env.ts` (objeto `env`)
@@ -187,6 +189,7 @@ Singleton `eventBus` (EventEmitter). Qualquer módulo pode chamar `eventBus.publ
 3. Crie o método de processamento em `Scheduler` seguindo o padrão dos existentes (`processXxxIssues` → `xxxWithIsolation`)
 4. Chame o novo método dentro de `tickForProject()` na ordem correta
 5. Se precisar de novo prompt, adicione em `PromptBuilder` e `prompt-base.ts`
+6. Documente o novo label/fluxo em `docs/MANUAL.md` — adicione na tabela de labels e crie uma secção em "Situações comuns" se for relevante para o utilizador
 
 ### Novo campo em ProjectConfig
 

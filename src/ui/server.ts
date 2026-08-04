@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { readFile } from 'fs/promises';
 import { eventBus, UIEvent } from './event-bus.js';
 import { logger } from '../utils/logger.js';
 import { loadProjectsFromFile, saveProjects, loadProjects, ProjectConfig } from '../config/project-config.js';
@@ -73,6 +74,18 @@ export function startUIServer(port: number): void {
       res.json({ ok: true });
     } catch (e) {
       res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // ── Manual ───────────────────────────────────────────────────────────────────
+
+  app.get('/api/manual', async (_req, res) => {
+    try {
+      const manualPath = join(__dirname, '..', 'docs', 'MANUAL.md');
+      const content = await readFile(manualPath, 'utf-8');
+      res.json({ content });
+    } catch {
+      res.status(404).json({ error: 'Manual não encontrado' });
     }
   });
 
