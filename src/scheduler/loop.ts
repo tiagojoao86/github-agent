@@ -113,6 +113,7 @@ export class Scheduler {
     await this.resumeWaitingForAgentIssues(project);
     await this.processCodeReviewIssues(project);
     await this.processAgentReviewIssues(project);
+    await this.processAgentPlanFixIssues(project);
   }
 
   // Processa issues marcadas como 'agent-ready'
@@ -588,6 +589,38 @@ O spec completo deste plano foi salvo em \`docs/specs/\` neste PR e ficará disp
       const stack = error instanceof Error ? error.stack : undefined;
       logger.error(`[${label}] Erro ao aplicar review na issue #${issue.number}`, { message, stack });
       await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_REVIEW).catch(() => {});
+    }
+  }
+
+  private async processAgentPlanFixIssues(project: ProjectContext): Promise<void> {
+    const { github, label } = project;
+    const issues = await github.getIssuesWithLabel(env.LABEL_PLAN_FIX);
+    if (issues.length === 0) return;
+    logger.info(`[${label}] Corrigindo branch de ${issues.length} plano(s)`);
+    const limit = pLimit(1);
+    await Promise.allSettled(issues.map(issue => limit(() => this.fixPlanBranchWithIsolation(project, issue))));
+  }
+
+  private async fixPlanBranchWithIsolation(project: ProjectContext, issue: GitHubIssue): Promise<void> {
+    const { github, agentRunner, label } = project;
+    try {
+      await github.transitionLabel(issue.number, env.LABEL_PLAN_FIX, env.LABEL_PROCESSING);
+      const result = await agentRunner.fixPlanBranch(issue);
+
+      if (result.type === 'success') {
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_DONE);
+        logger.info(`[${label}] Issue #${issue.number} — correção do plano aplicada`);
+      } else if (result.type === 'needs-clarification') {
+        await github.postComment(issue.number, result.question);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_WAITING);
+      } else if (result.type === 'rate-limit') {
+        this.rateLimitState.recordHit(result.retryAfterMs);
+        await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_PLAN_FIX);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`[${label}] Erro ao corrigir branch do plano #${issue.number}`, { message });
+      await github.transitionLabel(issue.number, env.LABEL_PROCESSING, env.LABEL_PLAN_FIX).catch(() => {});
     }
   }
 }

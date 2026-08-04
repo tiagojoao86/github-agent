@@ -258,6 +258,53 @@ ${reviewSection}`;
     return sections.join('\n\n');
   }
 
+  buildForPlanFix(
+    issue: GitHubIssue,
+    ragContext: RetrievalResult,
+    repoPath: string,
+    planBranch: string,
+    comments: GitHubComment[]
+  ): AgentPrompt {
+    const humanComments = comments.filter(c => !c.isBot);
+    const commentSection = humanComments.length > 0
+      ? humanComments.map(c => `**${c.author}:** ${c.body}`).join('\n\n---\n\n')
+      : '(sem comentários)';
+
+    const ragSection = ragContext.chunks.length > 0
+      ? ragContext.chunks.map(c => c.content).join('\n\n---\n\n')
+      : '(sem contexto RAG)';
+
+    const userPrompt = `## Correção da Branch do Plano
+
+**Issue #${issue.number}:** ${issue.title}
+**Branch do plano (trabalha diretamente nela):** \`${planBranch}\`
+
+## Problema Reportado
+
+${issue.body ?? '(sem descrição)'}
+
+## Comentários com detalhes do problema
+
+${commentSection}
+
+## Contexto do código (RAG)
+
+${ragSection}
+
+## Instruções
+
+Estás a trabalhar **diretamente na branch \`${planBranch}\`** — NÃO cries uma nova branch.
+
+1. Analisa o problema descrito acima (testes a falhar, erros de compilação, etc.)
+2. Corrige o código na branch \`${planBranch}\`
+3. Executa os testes para confirmar que estão a passar
+4. Faz commit das correções com uma mensagem descritiva
+5. **Não cries um PR** — já existe um PR aberto para esta branch; o push atualiza-o automaticamente
+6. Sinaliza com AGENT_STATUS conforme as instruções do sistema`;
+
+    return { systemPrompt: this.buildSystemPrompt(), userPrompt };
+  }
+
   private buildSystemPrompt(): string {
     return buildIssueSystemPrompt(this.config.localPath);
   }

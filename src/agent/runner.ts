@@ -172,6 +172,36 @@ export class AgentRunner {
     return this.config.models?.[stage] ?? DEFAULT_MODELS[stage];
   }
 
+  async fixPlanBranch(issue: GitHubIssue): Promise<AgentResult> {
+    const log = createContextLogger({ issueNumber: issue.number, phase: 'plan-fix' });
+
+    const planMeta = parsePlanMetadata(issue.body ?? '');
+    if (!planMeta?.planBranch) {
+      throw new Error(
+        `Issue #${issue.number} não contém agent-plan-meta com planBranch. ` +
+        `Adicione ao corpo da issue: <!-- agent-plan-meta: {"planIssue":N,"planBranch":"agent/plan-N","dependsOn":[],"step":0,"totalSteps":0} -->`
+      );
+    }
+
+    const planBranch = planMeta.planBranch;
+    log.info(`Corrigindo branch do plano diretamente: ${planBranch}`);
+
+    const git = await makeGit(this.config);
+    await git.fetch('origin');
+    await git.checkout(planBranch);
+
+    const allComments = await this.github.getComments(issue.number);
+    const ragContext = await this.ragEngine.retrieveContext(`${issue.title} ${issue.body ?? ''}`);
+
+    const prompt = this.promptBuilder.buildForPlanFix(issue, ragContext, this.config.localPath, planBranch, allComments);
+
+    return this.runAgentSession(
+      issue, planBranch,
+      prompt.systemPrompt, prompt.userPrompt,
+      true, false, this.config.baseBranch, false, this.resolveModel('dev')
+    );
+  }
+
   async codeReviewIssue(issue: GitHubIssue): Promise<AgentResult> {
     const log = createContextLogger({ issueNumber: issue.number, phase: 'code-review' });
 

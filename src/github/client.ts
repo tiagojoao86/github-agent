@@ -122,6 +122,7 @@ export class GitHubClient {
       { name: env.LABEL_PLAN_RUNNING,  color: 'e6ac00', description: 'Plano em execução' },
       { name: env.LABEL_QUEUED,        color: 'cccccc', description: 'Aguardando dependências' },
       { name: env.LABEL_CODE_REVIEW,   color: 'b60205', description: 'Aguardando code review do agente' },
+      { name: env.LABEL_PLAN_FIX,      color: 'e11d48', description: 'Corrigir branch do plano diretamente' },
     ];
 
     for (const labelDef of labelsToCreate) {

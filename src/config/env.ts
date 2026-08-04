@@ -61,6 +61,7 @@ export const env = {
   LABEL_PLAN_REVIEW: 'agent-plan-review',
   LABEL_PLAN_APPROVED: 'agent-plan-approved',
   LABEL_PLAN_RUNNING: 'agent-plan-running',
+  LABEL_PLAN_FIX: 'agent-plan-fix',
   LABEL_QUEUED: 'agent-queued',
 } as const;
 
