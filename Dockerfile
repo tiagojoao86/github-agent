@@ -7,6 +7,7 @@ COPY package*.json tsconfig.json ./
 RUN npm ci
 
 COPY src ./src
+COPY docs ./docs
 RUN npm run build
 
 # Estágio 2 — runtime (debian-slim para suportar o binário glibc do claude CLI)
