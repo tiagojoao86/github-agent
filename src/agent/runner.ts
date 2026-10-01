@@ -23,6 +23,19 @@ async function makeGit(config: ProjectConfig): Promise<SimpleGit> {
   return git;
 }
 
+// Uma sessão interrompida (limite de uso, timeout, crash) pode deixar o workspace
+// com merge/rebase pela metade ou alterações soltas, o que faz o checkout falhar
+// em todos os ticks seguintes. Commits locais são preservados; só o lixo é descartado.
+async function checkoutClean(git: SimpleGit, branch: string): Promise<void> {
+  await git.raw(['merge', '--abort']).catch(() => {});
+  await git.raw(['rebase', '--abort']).catch(() => {});
+  await git.raw(['cherry-pick', '--abort']).catch(() => {});
+  await git.raw(['reset', '--hard']);
+  await git.raw(['clean', '-fd']);
+  await git.fetch('origin');
+  await git.checkout(branch);
+}
+
 export type AgentResult =
   | { type: 'success'; prUrl: string }
   | { type: 'needs-clarification'; question: string }
@@ -57,8 +70,7 @@ export class AgentRunner {
 
     // 2. Configura o git local para usar a branch
     const git: SimpleGit = await makeGit(this.config);
-    await git.fetch('origin');
-    await git.checkout(branchName);
+    await checkoutClean(git, branchName);
     log.info('Git local configurado na branch');
 
     // 3. Recupera contexto RAG
@@ -89,8 +101,7 @@ export class AgentRunner {
     log.info(`Plan branch: ${planBranch}`);
 
     const git: SimpleGit = await makeGit(this.config);
-    await git.fetch('origin');
-    await git.checkout(planBranch);
+    await checkoutClean(git, planBranch);
 
     // Verifica se já existe um plano (modo revisão)
     const existingPlan = await this.github.readFileFromBranch(planBranch, '.agent-plan.json');
@@ -124,8 +135,7 @@ export class AgentRunner {
     const branchName = this.github.getBranchName(issue.number);
 
     const git = await makeGit(this.config);
-    await git.fetch('origin');
-    await git.checkout(branchName);
+    await checkoutClean(git, branchName);
 
     const queryText = `${issue.title} ${issue.body ?? ''} ${humanResponse}`;
     const ragContext = await this.ragEngine.retrieveContext(queryText);
@@ -149,8 +159,7 @@ export class AgentRunner {
     const branchName = this.github.getBranchName(issue.number);
 
     const git = await makeGit(this.config);
-    await git.fetch('origin');
-    await git.checkout(branchName);
+    await checkoutClean(git, branchName);
 
     const queryText = `${issue.title} ${issue.body ?? ''} ${reviewComments.map(c => c.body).join(' ')}`;
     const ragContext = await this.ragEngine.retrieveContext(queryText);
@@ -187,8 +196,7 @@ export class AgentRunner {
     log.info(`Corrigindo branch do plano diretamente: ${planBranch}`);
 
     const git = await makeGit(this.config);
-    await git.fetch('origin');
-    await git.checkout(planBranch);
+    await checkoutClean(git, planBranch);
 
     const allComments = await this.github.getComments(issue.number);
     const ragContext = await this.ragEngine.retrieveContext(`${issue.title} ${issue.body ?? ''}`);
@@ -322,6 +330,13 @@ export class AgentRunner {
       // então o loop termina normalmente. Detectamos o timeout aqui.
       if (controller.signal.aborted) {
         log.warn('Sessão encerrada por timeout — devolvendo para fila');
+        eventBus.publish({ type: 'session_end', issueNumber: issue.number, result: 'rate-limit', totalTokens: { ...running }, timestamp: now() });
+        return { type: 'rate-limit' };
+      }
+
+      // Limite de uso da subscrição: o CLI não lança erro, apenas escreve a mensagem e termina.
+      if (/hit your (session|usage) limit|usage limit reached/i.test(fullAgentOutput)) {
+        log.warn('Limite de uso da subscrição atingido — devolvendo para fila');
         eventBus.publish({ type: 'session_end', issueNumber: issue.number, result: 'rate-limit', totalTokens: { ...running }, timestamp: now() });
         return { type: 'rate-limit' };
       }

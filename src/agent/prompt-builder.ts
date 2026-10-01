@@ -319,6 +319,8 @@ Estás a trabalhar **diretamente na branch \`${planBranch}\`** — NÃO cries um
     planMeta?: PlanMetadata | null;
   }): string {
     const { projectContext, ragSection, issue, branchName, previousConversation, planContext, planMeta } = params;
+    // Mesma regra do runner: issues filhas de plano abrem PR contra a branch do plano
+    const targetBranch = planMeta?.planBranch ?? this.config.baseBranch;
 
     let prompt = `## Contexto do Projeto
 
@@ -351,6 +353,12 @@ ${ragSection}
 **Repositório:** ${this.config.owner}/${this.config.repo}
 **Issue #${issue.number}:** ${issue.title}
 **URL:** ${issue.htmlUrl}
+**Branch de trabalho:** \`${branchName}\`
+**Branch destino do PR:** \`${targetBranch}\`
+
+> Se for preciso atualizar a branch ou resolver conflitos (ex: "o PR tem conflitos"),
+> faça merge **exclusivamente** de \`origin/${targetBranch}\`. Nunca use \`main\`, \`dev\`
+> ou outra branch — o PR é aberto contra \`${targetBranch}\`.
 
 **Descrição:**
 ${issue.body ?? '(Sem descrição)'}
