@@ -64,9 +64,13 @@ export class AgentRunner {
     const planMeta = parsePlanMetadata(issue.body ?? '');
     const baseBranch = planMeta?.planBranch ?? this.config.baseBranch;
 
-    // 1. Cria a branch no GitHub (a partir da plan branch se for filha de plano)
-    const branchName = await this.github.createBranch(issue.number, baseBranch);
-    log.info(`Branch criada: ${branchName}`);
+    // 1. Cria a branch no GitHub (a partir da plan branch se for filha de plano).
+    //    Issue pai de plano reutiliza agent/plan-N (ex: code review rejeitou correção de conflito).
+    const existingBranch = await this.github.resolveWorkBranch(issue.number);
+    const branchName = existingBranch.startsWith('agent/plan-')
+      ? existingBranch
+      : await this.github.createBranch(issue.number, baseBranch);
+    log.info(`Branch de trabalho: ${branchName}`);
 
     // 2. Configura o git local para usar a branch
     const git: SimpleGit = await makeGit(this.config);
@@ -132,7 +136,7 @@ export class AgentRunner {
 
     const planMeta = parsePlanMetadata(issue.body ?? '');
     const baseBranch = planMeta?.planBranch ?? this.config.baseBranch;
-    const branchName = this.github.getBranchName(issue.number);
+    const branchName = await this.github.resolveWorkBranch(issue.number);
 
     const git = await makeGit(this.config);
     await checkoutClean(git, branchName);
@@ -156,7 +160,7 @@ export class AgentRunner {
   async reviewIssue(issue: GitHubIssue, prNumber: number, reviewComments: PRReviewComment[]): Promise<AgentResult> {
     const log = createContextLogger({ issueNumber: issue.number, phase: 'review' });
 
-    const branchName = this.github.getBranchName(issue.number);
+    const branchName = await this.github.resolveWorkBranch(issue.number);
 
     const git = await makeGit(this.config);
     await checkoutClean(git, branchName);
@@ -215,7 +219,7 @@ export class AgentRunner {
 
     const planMeta = parsePlanMetadata(issue.body ?? '');
     const baseBranch = planMeta?.planBranch ?? this.config.baseBranch;
-    const branchName = this.github.getBranchName(issue.number);
+    const branchName = await this.github.resolveWorkBranch(issue.number);
 
     log.info(`Iniciando code review — branch: ${branchName}, base: ${baseBranch}`);
 

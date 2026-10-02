@@ -545,7 +545,7 @@ O spec completo deste plano foi salvo em \`docs/specs/\` neste PR e ficará disp
     try {
       await github.transitionLabel(issue.number, env.LABEL_REVIEW, env.LABEL_PROCESSING);
 
-      const branchName = github.getBranchName(issue.number);
+      const branchName = await github.resolveWorkBranch(issue.number);
       const pr = await github.findPRForBranch(branchName).catch(() => null);
 
       if (!pr) {

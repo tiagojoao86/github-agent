@@ -158,6 +158,18 @@ O agente vai trabalhar diretamente na branch `agent/plan-137`, corrigir os teste
 
 ---
 
+### O PR tem conflitos com a branch destino
+
+**Sintoma:** o GitHub indica conflitos no PR aberto pelo agente.
+
+**O que fazer:**
+1. Posta um comentário na issue a pedir para resolver os conflitos
+2. Muda o label para **`waiting-for-agent`**
+
+Funciona tanto para issues comuns (`agent/issue-N`) como para a **issue pai de um plano**: neste caso o agente trabalha na branch `agent/plan-N` e resolve os conflitos contra `dev` (a branch base do projeto). Nas issues filhas de um plano, os conflitos são resolvidos contra `agent/plan-N`, que é o destino do PR delas.
+
+---
+
 ### O agente ficou preso em `agent-processing`
 
 **Sintoma:** issue com `agent-processing` há mais de 10 minutos sem actividade nos logs.

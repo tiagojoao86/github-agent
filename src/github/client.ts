@@ -207,6 +207,28 @@ export class GitHubClient {
     return `agent/issue-${issueNumber}`;
   }
 
+  async branchExists(branch: string): Promise<boolean> {
+    try {
+      await this.octokit.git.getRef({ owner: this.owner, repo: this.repo, ref: `heads/${branch}` });
+      return true;
+    } catch (error: unknown) {
+      if (isOctokitError(error) && error.status === 404) return false;
+      throw error;
+    }
+  }
+
+  // Issues comuns trabalham em agent/issue-N; a issue pai de um plano trabalha em agent/plan-N
+  // (ex: humano pede para resolver conflitos do PR final do plano via waiting-for-agent).
+  async resolveWorkBranch(issueNumber: number): Promise<string> {
+    const issueBranch = this.getBranchName(issueNumber);
+    if (await this.branchExists(issueBranch)) return issueBranch;
+
+    const planBranch = `agent/plan-${issueNumber}`;
+    if (await this.branchExists(planBranch)) return planBranch;
+
+    return issueBranch;
+  }
+
   async createBranch(issueNumber: number, baseBranch?: string): Promise<string> {
     const resolvedBase = baseBranch ?? this.config.baseBranch;
     const branchName = this.getBranchName(issueNumber);
